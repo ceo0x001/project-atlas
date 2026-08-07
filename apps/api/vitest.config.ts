@@ -15,6 +15,9 @@ export default defineConfig({
   },
   test: {
     include: ['src/**/*.test.ts', 'test/**/*.test.ts'],
+    // Integration tests need a live Postgres, so they run separately
+    // (`pnpm test:integration`) and stay out of the default unit run.
+    exclude: ['**/node_modules/**', '**/*.integration.test.ts'],
     environment: 'node',
   },
 });

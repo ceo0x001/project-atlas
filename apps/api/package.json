@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "lint": "eslint src",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",

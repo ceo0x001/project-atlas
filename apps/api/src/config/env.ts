@@ -16,7 +16,14 @@ const baseSchema = z.object({
   PORT: z.coerce.number().int().positive().max(65535).default(3000),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 
+  /** Application connection — the `atlas_app` role, subject to row-level security. */
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+  /**
+   * Owner connection, used only by the Prisma CLI for migrations. Optional here
+   * because the running service must never need it — if this process ever reads it,
+   * something is reaching for privileges it should not have.
+   */
+  DATABASE_MIGRATION_URL: z.string().optional(),
   REDIS_URL: z.string().min(1, 'REDIS_URL is required'),
 
   TEMPORAL_ADDRESS: z.string().default('localhost:7233'),

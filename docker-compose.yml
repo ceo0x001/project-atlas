@@ -1,8 +1,8 @@
 # Local development infrastructure.
 #
-# NOTE: this file has not been executed yet — Docker is not installed on the
-# development machine (see docs/DEVELOPMENT.md). Image tags are pinned rather than
-# floating on :latest, but expect to adjust them on first run.
+# Verified working on OrbStack (Docker 29.x, Compose 5.x): all five services come up
+# healthy and the pinned tags resolve. Tags are pinned rather than floating on
+# :latest so a rebuild months from now behaves the same.
 #
 # Start with: pnpm infra:up
 

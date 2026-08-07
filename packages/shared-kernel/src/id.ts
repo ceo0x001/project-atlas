@@ -1,4 +1,4 @@
-import { monotonicFactory, ulid } from 'ulid';
+import { factory, monotonicFactory } from 'ulid';
 
 /**
  * Identifiers are ULIDs: lexicographically sortable by creation time, URL-safe, and
@@ -54,7 +54,29 @@ export function isUlid(value: string): boolean {
   return ULID_PATTERN.test(value);
 }
 
-/** Deterministic id generation for tests and fixtures. */
-export function idFromSeed<T extends string>(seedMilliseconds: number): Branded<T> {
-  return ulid(seedMilliseconds) as Branded<T>;
+/**
+ * Fully deterministic id generation, for tests and fixtures.
+ *
+ * The same seed always yields the same ULID. A previous version seeded only the
+ * timestamp half and left the random half random, so two calls with one seed
+ * produced *different* ids — which silently broke any test that generated an id
+ * during setup and regenerated it during assertion.
+ *
+ * Seeds both halves: the timestamp from the seed, and the random component from a
+ * small xorshift PRNG driven by the same seed.
+ */
+export function idFromSeed<T extends string>(seed: number): Branded<T> {
+  // Zero is a fixed point for xorshift, so fall back to the golden-ratio constant.
+  let state = seed >>> 0 || 0x9e37_79b9;
+
+  const prng = (): number => {
+    state ^= state << 13;
+    state >>>= 0;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    state >>>= 0;
+    return state / 0x1_0000_0000;
+  };
+
+  return factory(prng)(seed) as Branded<T>;
 }

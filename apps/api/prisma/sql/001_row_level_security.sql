@@ -51,8 +51,12 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 -- Tenant isolation policies
 -- ============================================================================
 
--- Tables owned entirely by one user: a row is visible only when its user_id
+-- Tables owned entirely by one user: a row is visible only when its userId
 -- matches the current transaction's setting.
+--
+-- NOTE ON QUOTING: Prisma generates camelCase column names, so every reference
+-- from raw SQL must be double-quoted ("userId", not user_id). Unquoted identifiers
+-- are folded to lower case by Postgres and will not resolve.
 DO $$
 DECLARE
   target text;
@@ -79,8 +83,8 @@ BEGIN
     EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', target);
     EXECUTE format(
       'CREATE POLICY tenant_isolation ON %I
-         USING (user_id = current_setting(''atlas.user_id'', true))
-         WITH CHECK (user_id = current_setting(''atlas.user_id'', true))',
+         USING ("userId" = current_setting(''atlas.user_id'', true))
+         WITH CHECK ("userId" = current_setting(''atlas.user_id'', true))',
       target
     );
   END LOOP;
@@ -108,8 +112,8 @@ BEGIN
     EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', target);
     EXECUTE format(
       'CREATE POLICY tenant_isolation ON %I
-         USING (user_id IS NULL OR user_id = current_setting(''atlas.user_id'', true))
-         WITH CHECK (user_id = current_setting(''atlas.user_id'', true))',
+         USING ("userId" IS NULL OR "userId" = current_setting(''atlas.user_id'', true))
+         WITH CHECK ("userId" = current_setting(''atlas.user_id'', true))',
       target
     );
   END LOOP;

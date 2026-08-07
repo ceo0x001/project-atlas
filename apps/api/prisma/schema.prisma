@@ -17,9 +17,19 @@ generator client {
   previewFeatures = ["postgresqlExtensions"]
 }
 
+// Two connection strings, deliberately.
+//
+// `url` is the *application* connection and uses the `atlas_app` role: no
+// superuser, no BYPASSRLS. Row-level security therefore applies to every query the
+// running service makes, and the service cannot opt out because it does not hold
+// credentials that could.
+//
+// `directUrl` is the *owner* connection, used only by Prisma Migrate, Introspect
+// and Studio. Migrations need to create tables and policies; the app never should.
 datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
+  directUrl  = env("DATABASE_MIGRATION_URL")
   extensions = [vector, pgcrypto]
 }
 
@@ -35,9 +45,9 @@ model User {
   locale          String    @default("en-NG")
   timezone        String    @default("Africa/Lagos")
   primaryCurrency String    @default("NGN")
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  deactivatedAt   DateTime?
+  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
+  deactivatedAt   DateTime? @db.Timestamptz(3)
 
   accounts            Account[]
   devices             Device[]
@@ -79,9 +89,9 @@ model Device {
   osVersion  String?
   appVersion String?
   pushToken  String?
-  lastSeenAt DateTime?
-  createdAt  DateTime       @default(now())
-  revokedAt  DateTime?
+  lastSeenAt DateTime? @db.Timestamptz(3)
+  createdAt  DateTime       @default(now()) @db.Timestamptz(3)
+  revokedAt  DateTime? @db.Timestamptz(3)
 
   user         User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
   observations TransactionObservation[]
@@ -105,8 +115,8 @@ model Consent {
   userId        String
   scope         ConsentScope
   policyVersion String
-  grantedAt     DateTime     @default(now())
-  revokedAt     DateTime?
+  grantedAt     DateTime     @default(now()) @db.Timestamptz(3)
+  revokedAt     DateTime? @db.Timestamptz(3)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -126,7 +136,7 @@ model Institution {
   country      String   @default("NG")
   smsSenderIds String[]
   logoUrl      String?
-  createdAt    DateTime @default(now())
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
 
   accounts       Account[]
   observations   TransactionObservation[]
@@ -161,11 +171,11 @@ model Account {
   /// Cached projection of the ledger, refreshed on write. Balances are always
   /// recomputable from transactions — this is an optimisation, not a source of truth.
   currentBalanceMinor BigInt?
-  balanceAsOf         DateTime?
+  balanceAsOf         DateTime? @db.Timestamptz(3)
 
   isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
 
   user         User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
   institution  Institution?             @relation(fields: [institutionId], references: [id])
@@ -204,8 +214,8 @@ model Transaction {
   amountMinor BigInt
   currency    String
   direction   TransactionDirection
-  occurredAt  DateTime
-  bookedAt    DateTime?
+  occurredAt  DateTime @db.Timestamptz(3)
+  bookedAt    DateTime? @db.Timestamptz(3)
 
   description String
   narration   String?
@@ -223,8 +233,8 @@ model Transaction {
   recurringSeriesId String?
   status            TransactionStatus @default(POSTED)
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
 
   user            User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
   account         Account                  @relation(fields: [accountId], references: [id], onDelete: Cascade)
@@ -266,7 +276,7 @@ model TransactionObservation {
   amountMinor BigInt
   currency    String
   direction   TransactionDirection
-  occurredAt  DateTime
+  occurredAt  DateTime @db.Timestamptz(3)
 
   balanceAfterMinor BigInt?
   description       String?
@@ -279,8 +289,8 @@ model TransactionObservation {
   parsedByTemplateId String?
   statementImportId  String?
 
-  observedAt DateTime
-  createdAt  DateTime @default(now())
+  observedAt DateTime @db.Timestamptz(3)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
 
   user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   transaction  Transaction?     @relation(fields: [transactionId], references: [id])
@@ -307,7 +317,7 @@ model Category {
   color    String?
   isSystem Boolean @default(false)
 
-  createdAt DateTime @default(now())
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
 
   user         User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
   parent       Category?        @relation("CategoryHierarchy", fields: [parentId], references: [id])
@@ -327,7 +337,7 @@ model Merchant {
   normalizedName    String
   defaultCategoryId String?
 
-  createdAt DateTime @default(now())
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
 
   user            User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
   defaultCategory Category?         @relation(fields: [defaultCategoryId], references: [id])
@@ -347,7 +357,7 @@ model FxRate {
   quote           String
   rateNumerator   BigInt
   rateDenominator BigInt
-  asOf            DateTime
+  asOf            DateTime @db.Timestamptz(3)
   source          String
 
   @@unique([base, quote, asOf])
@@ -392,9 +402,9 @@ model ParseTemplate {
 
   status    TemplateStatus @default(DRAFT)
   author    TemplateAuthor @default(SYSTEM)
-  createdAt DateTime       @default(now())
-  publishedAt DateTime?
-  retiredAt   DateTime?
+  createdAt DateTime       @default(now()) @db.Timestamptz(3)
+  publishedAt DateTime? @db.Timestamptz(3)
+  retiredAt   DateTime? @db.Timestamptz(3)
 
   institution      Institution              @relation(fields: [institutionId], references: [id], onDelete: Cascade)
   observations     TransactionObservation[]
@@ -420,8 +430,8 @@ model ParseFailure {
   consentGranted Boolean          @default(false)
 
   resolvedByTemplateId String?
-  resolvedAt           DateTime?
-  createdAt            DateTime  @default(now())
+  resolvedAt           DateTime? @db.Timestamptz(3)
+  createdAt            DateTime  @default(now()) @db.Timestamptz(3)
 
   user               User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   institution        Institution?   @relation(fields: [institutionId], references: [id])
@@ -464,8 +474,8 @@ model StatementImport {
   failureReason String?
   workflowId    String?
 
-  createdAt   DateTime  @default(now())
-  completedAt DateTime?
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  completedAt DateTime? @db.Timestamptz(3)
 
   user         User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
   account      Account?                 @relation(fields: [accountId], references: [id])
@@ -514,8 +524,8 @@ model Insight {
   payload Json
 
   status      InsightStatus @default(NEW)
-  generatedAt DateTime      @default(now())
-  expiresAt   DateTime?
+  generatedAt DateTime      @default(now()) @db.Timestamptz(3)
+  expiresAt   DateTime? @db.Timestamptz(3)
 
   /// Stable key so a re-run of the same detection does not produce duplicates.
   dedupeKey String
@@ -570,13 +580,13 @@ model RecurringSeries {
   expectedAmountMinor BigInt
   currency            String
 
-  lastSeenAt     DateTime
-  nextExpectedAt DateTime?
+  lastSeenAt     DateTime @db.Timestamptz(3)
+  nextExpectedAt DateTime? @db.Timestamptz(3)
   confidence     Float
   isActive       Boolean   @default(true)
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
 
   user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   merchant     Merchant?     @relation(fields: [merchantId], references: [id])
@@ -611,11 +621,11 @@ model Fact {
   source     FactSource
   provenance Json?
 
-  effectiveFrom DateTime  @default(now())
-  effectiveTo   DateTime?
+  effectiveFrom DateTime  @default(now()) @db.Timestamptz(3)
+  effectiveTo   DateTime? @db.Timestamptz(3)
   supersededById String?  @unique
 
-  createdAt DateTime @default(now())
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
 
   user        User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   supersededBy Fact? @relation("FactVersions", fields: [supersededById], references: [id])
@@ -634,8 +644,8 @@ model Episode {
   userId    String
   sessionId String?
   summary   String
-  occurredAt DateTime
-  createdAt DateTime @default(now())
+  occurredAt DateTime @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
 
   embedding Unsupported("vector(1024)")?
 
@@ -660,8 +670,8 @@ model ConversationSession {
   userId    String
   deviceId  String?
   channel   ConversationChannel
-  startedAt DateTime            @default(now())
-  endedAt   DateTime?
+  startedAt DateTime            @default(now()) @db.Timestamptz(3)
+  endedAt   DateTime? @db.Timestamptz(3)
 
   user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   turns    ConversationTurn[]
@@ -709,7 +719,7 @@ model ConversationTurn {
   /// Cost in millionths of a USD — integer, for the same reason money is (ADR-003).
   costMicroUsd       Int?
 
-  createdAt DateTime @default(now())
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
 
   session ConversationSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
@@ -731,9 +741,9 @@ model OutboxEvent {
   userId        String
   payload       Json
   schemaVersion Int      @default(1)
-  occurredAt    DateTime @default(now())
+  occurredAt    DateTime @default(now()) @db.Timestamptz(3)
 
-  publishedAt DateTime?
+  publishedAt DateTime? @db.Timestamptz(3)
   attempts    Int       @default(0)
   lastError   String?
 

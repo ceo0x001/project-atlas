@@ -10,9 +10,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Prisma requires the variable to be present to read the schema. No database is
-  # contacted in this job; a Postgres service arrives with M1's repository tests.
-  DATABASE_URL: postgresql://atlas:atlas@localhost:5432/atlas?schema=public
+  # Two roles, matching production posture: the app runs as `atlas_app` (subject to
+  # row-level security), migrations as the owner. The RLS migration creates the app
+  # role, so this URL only works after `migrate deploy`.
+  DATABASE_URL: postgresql://atlas_app:atlas_app@localhost:5432/atlas?schema=public
+  DATABASE_MIGRATION_URL: postgresql://atlas:atlas@localhost:5432/atlas?schema=public
   REDIS_URL: redis://localhost:6379
 
 jobs:
@@ -20,6 +22,23 @@ jobs:
     name: Backend
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
+    services:
+      postgres:
+        # Must be the pgvector image: the schema declares the extension, so a plain
+        # postgres image fails the migration rather than the tests.
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: atlas
+          POSTGRES_PASSWORD: atlas
+          POSTGRES_DB: atlas
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U atlas -d atlas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +65,16 @@ jobs:
 
       - name: Build
         run: pnpm run build
+
+      # Applies the schema *and* the row-level security policies, which are appended
+      # into the migration itself so no environment can come up without them.
+      - name: Apply migrations
+        run: pnpm --filter @atlas/api exec prisma migrate deploy
+
+      # Proves the compiled SQL executes and that tenant isolation holds when
+      # reached through application code — not just in the unit assertions.
+      - name: Integration tests
+        run: pnpm --filter @atlas/api run test:integration
 
   mobile:
     name: Mobile

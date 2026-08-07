@@ -2,23 +2,26 @@
 
 ## What runs today (M0 complete, M1 in progress)
 
-| Piece                    | State                                                                                                 |
-| ------------------------ | ----------------------------------------------------------------------------------------------------- |
-| `packages/shared-kernel` | Builds, 54 tests pass, lint clean                                                                     |
-| `apps/api`               | Builds, boots, 186 tests pass, lint clean; `/health/live` 200, `/health/ready` 503 without a database |
-| SMS template engine      | Complete and tested — parsing, transforms, validation gate, dedupe keys (M1)                          |
-| Ledger query compiler    | Complete and tested — plan validation and parameterised SQL generation (M1)                           |
-| Prisma schema            | Validates; client generates. **No migration has been run** — no Postgres available yet                |
-| Ledger repository        | Not started — needs Postgres                                                                          |
-| Reconciliation           | Not started (M2)                                                                                      |
-| `docker-compose.yml`     | Written, **never executed** — Docker is not installed                                                 |
-| `apps/mobile`            | Dart sources written, **never compiled** — Flutter is not installed                                   |
-| CI                       | Written, not yet run                                                                                  |
+| Piece                    | State                                                                                                |
+| ------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `packages/shared-kernel` | Builds, 66 tests pass, lint clean                                                                    |
+| `apps/api`               | Builds, boots, 186 unit tests pass, lint clean; `/health/live` 200, `/health/ready` 503 without a DB |
+| SMS template engine      | Complete and tested — parsing, transforms, validation gate, dedupe keys                              |
+| Ledger query compiler    | Complete and tested — plan validation and parameterised SQL generation                               |
+| Local infrastructure     | **Running.** Postgres 17.10 + pgvector 0.8.6, Redis, Temporal (SERVING), Temporal UI, Jaeger         |
+| Migration + RLS          | **Applied.** 22 tables, 17 policies, `atlas_app` role without superuser or BYPASSRLS                 |
+| Ledger repository        | Read side complete — 17 integration tests against real Postgres                                      |
+| Ledger write side        | Not started — lands with reconciliation (M2)                                                         |
+| SMS sync endpoint        | Not started — needs the Android device                                                               |
+| `apps/mobile`            | Dart sources written, **never compiled** — Flutter is not installed                                  |
+| CI                       | Written with a Postgres service, **not yet run** — nothing has been pushed                           |
 
-Nothing above is claimed to work beyond what that table says. In particular the
-query compiler generates SQL that has **never been executed against Postgres** —
-its tests assert the generated string and bind parameters, not that the database
-accepts them.
+Nothing above is claimed to work beyond what that table says.
+
+Tenant isolation is verified rather than assumed: with no `atlas.user_id` set a query
+returns **zero rows**, a cross-tenant `INSERT` is rejected by the policy, and a
+cross-tenant `UPDATE` affects zero rows. The integration suite asserts the same three
+properties through the repository, not just through psql.
 
 ## The M1 core, and what it guarantees
 
@@ -71,10 +74,41 @@ Already present: Node 25.9, pnpm 11.16, git.
 Still needed:
 
 ```bash
-brew install --cask orbstack      # Docker runtime — lighter and faster than Docker Desktop on macOS
+brew install colima docker docker-compose   # container runtime — see note below
 brew install --cask flutter
-brew install --cask temurin       # JDK, for Android builds
+brew install --cask temurin                 # JDK, for Android builds
 ```
+
+Then start the VM once; it persists across reboots:
+
+```bash
+colima start --cpu 4 --memory 6 --disk 60
+```
+
+If `docker compose` is not found, link the Homebrew plugin:
+
+```bash
+mkdir -p ~/.docker/cli-plugins && ln -sfn "$(brew --prefix)/opt/docker-compose/bin/docker-compose" ~/.docker/cli-plugins/docker-compose
+```
+
+**Choosing a container runtime.** No runtime needs a Docker account, and every image
+in `docker-compose.yml` is public. `pnpm infra:up` behaves identically on all three,
+so this is a cost/licensing preference, not a technical one:
+
+| Runtime            | Licence                                                 | Notes                                     |
+| ------------------ | ------------------------------------------------------- | ----------------------------------------- |
+| **Colima**         | Apache-2.0, free for any use                            | CLI only; what the commands above install |
+| **OrbStack**       | Free tier is "personal, non-commercial"; Pro $8/user/mo | Fastest, best UX on macOS                 |
+| **Docker Desktop** | Free below a company size/revenue threshold             | Heaviest of the three                     |
+
+Atlas is intended to be a commercial product, so OrbStack's free tier stops applying
+at some point and Docker Desktop's does above their threshold. Colima has no such
+condition. If you prefer OrbStack, `brew install --cask orbstack` and skip the
+`colima start` step — everything else is unchanged.
+
+Docker Hub rate-limits anonymous pulls by IP. Five images pulled once and cached
+locally is well inside it; if you ever see `toomanyrequests`, a free Docker Hub
+account and `docker login` raises the ceiling.
 
 A **physical mid-range Android device** is also required from M1 (ADR-006
 Amendment 1) — SMS ingestion cannot be tested on an emulator, and a flagship hides
@@ -89,17 +123,25 @@ pnpm infra:up
 pnpm run db:generate
 ```
 
-Then the migration, which needs one manual step because Prisma does not model
-row-level security:
+Then apply the schema. The committed migration already contains the row-level
+security policies, so this is a single step:
 
 ```bash
-pnpm --filter @atlas/api exec prisma migrate dev --create-only --name init
-cat apps/api/prisma/sql/001_row_level_security.sql >> apps/api/prisma/migrations/*_init/migration.sql
-pnpm --filter @atlas/api exec prisma migrate dev
+pnpm --filter @atlas/api exec prisma migrate deploy
 ```
 
-Appending rather than running separately keeps RLS inside the migration history, so
-a fresh environment can never come up with policies missing.
+**When you add a future migration**, Prisma will not generate the RLS parts — it does
+not model policies. Any migration that creates a user-scoped table needs the policy
+appended by hand:
+
+```bash
+pnpm --filter @atlas/api exec prisma migrate dev --create-only --name <name>
+# then append the relevant policy SQL into that migration's migration.sql
+pnpm --filter @atlas/api exec prisma migrate deploy
+```
+
+Keeping the policies inside the migration rather than in a separate script is
+deliberate: it means no environment can ever come up with tables but no isolation.
 
 Start the API:
 
@@ -111,9 +153,13 @@ pnpm dev
 
 ```bash
 pnpm verify        # format check, lint, typecheck, test — what CI runs
-pnpm test          # tests only
+pnpm test          # unit tests only, no infrastructure needed
 pnpm build
 pnpm db:studio     # browse the database
+
+# Integration tests: real Postgres, real migration, real row-level security.
+# Needs `pnpm infra:up` first.
+pnpm --filter @atlas/api run test:integration
 ```
 
 Local service UIs once `pnpm infra:up` is running: Temporal on
@@ -156,6 +202,25 @@ this codebase exists to prevent.
 **The API starts without a database.** It logs an error and reports
 `/health/ready` 503 rather than exiting. A process that crash-loops on a transient
 Postgres blip turns a recoverable incident into an outage.
+
+**Every ledger read must go through `TenantScope`.** Row-level security reads
+`atlas.user_id`, which is transaction-local, so a query issued outside a scope
+matches no policy and returns zero rows. Forgetting the wrapper therefore shows up as
+"no data" in development rather than as a cross-tenant leak in production — the
+failure direction we can live with.
+
+**`DateTime` in Prisma is `timestamp WITHOUT time zone` by default.** Every DateTime
+field carries `@db.Timestamptz(3)` for a reason: `AT TIME ZONE` means opposite things
+on the two types. On `timestamptz` it converts an instant _into_ a zone; on
+`timestamp` it interprets the value _as being in_ that zone and hands back a
+`timestamptz`. With the default mapping, monthly totals were being shifted an hour
+**backwards** instead of forwards — silently, and only visibly wrong near midnight.
+If you add a DateTime column, annotate it.
+
+**Rebuild `shared-kernel` after changing it.** `apps/api` resolves
+`@atlas/shared-kernel` to its compiled `dist`, so an edit to the package is invisible
+to the API's tests until `pnpm build` runs. Turbo handles this for `pnpm verify`;
+running a single test file directly does not.
 
 ## Deferred, on purpose
 
