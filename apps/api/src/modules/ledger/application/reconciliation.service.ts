@@ -25,6 +25,21 @@ import {
   projectTransaction,
 } from '../domain/reconciliation/transaction-projection';
 
+/**
+ * Thrown when another handler admitted this observation first.
+ *
+ * Not an error condition — at-least-once delivery makes concurrent handling of the same event
+ * *expected*, and the in-process dispatch races the outbox relay by design. It is an exception
+ * rather than a return value because it must roll back the surrounding database transaction: the
+ * loser has already created a transaction row, and that row must not survive.
+ */
+export class ObservationAlreadyAdmitted extends Error {
+  constructor(observationId: ObservationId) {
+    super(`Observation ${observationId} was admitted by another handler`);
+    this.name = 'ObservationAlreadyAdmitted';
+  }
+}
+
 /** Why a split was refused. Expected outcomes, not exceptions. */
 export type SplitRefusal =
   | 'observation-not-found'
@@ -80,12 +95,34 @@ export class ReconciliationService {
     observationId: ObservationId,
     transactionId: TransactionId,
   ): Promise<void> {
-    await tx.transactionObservation.update({
-      where: { id: observationId },
+    await this.claimObservation(tx, observationId, transactionId);
+    await this.reproject(tx, userId, transactionId);
+  }
+
+  /**
+   * Links an observation to a transaction, but only if nothing else has claimed it.
+   *
+   * **This is what makes admission safe under concurrent delivery**, and a plain read-then-write
+   * is not. Checking `transactionId === null` and then writing lets two handlers both pass the
+   * check and both create a transaction for the same money — leaving an orphaned transaction with
+   * no observations that still counts in every total. That is a silently doubled figure, the worst
+   * failure this product has.
+   *
+   * The condition lives in the WHERE clause so Postgres decides the winner: the second updater
+   * blocks on the row lock, then re-evaluates `transactionId IS NULL` after the first commits and
+   * matches nothing. Losing is normal, and the loser must roll back rather than continue.
+   */
+  async claimObservation(
+    tx: TenantClient,
+    observationId: ObservationId,
+    transactionId: TransactionId,
+  ): Promise<void> {
+    const claimed = await tx.transactionObservation.updateMany({
+      where: { id: observationId, transactionId: null },
       data: { transactionId },
     });
 
-    await this.reproject(tx, userId, transactionId);
+    if (claimed.count === 0) throw new ObservationAlreadyAdmitted(observationId);
   }
 
   /**

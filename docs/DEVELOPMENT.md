@@ -33,7 +33,7 @@ reason `DeviceEnrolmentService` has never had a controller.
 | Piece                    | State                                                                                                   |
 | ------------------------ | ------------------------------------------------------------------------------------------------------- |
 | `packages/shared-kernel` | Builds, 66 tests, lint clean                                                                            |
-| `apps/api`               | Builds, boots, 514 unit tests + 152 integration, lint clean                                             |
+| `apps/api`               | Builds, boots, 517 unit tests + 154 integration, lint clean                                             |
 | SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                           |
 | Ledger                   | Read path, admission, balance anchoring; RLS enforced and proven                                        |
 | Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                                     |
@@ -217,6 +217,37 @@ so **`parseEnv` refuses to start when `NODE_ENV=production` and `OTP_SENDER=log`
 `log` is the only value, production cannot boot at all yet. That is deliberate and pinned by
 a test, so removing the check to "unblock a deploy" fails the build rather than shipping the
 hole.
+
+## The race that a live run found
+
+Running the real server surfaced a defect no test could see, and it was the worst class this
+product has: **a live statement import reported spending twice over.**
+
+`StatementImportService` commits its outbox rows, then dispatches in-process. The outbox relay
+claims those same rows on its next tick. Both handlers read `transactionId === null`, both created
+a transaction for the same observation, and the loser's row survived as an **orphan with no
+observations that every aggregate still counted**. Two observations produced four transactions;
+₦2,000 of spending read as ₦4,000.
+
+**Why the suite was blind to it.** `OutboxRelay` does not start when `NODE_ENV=test` — deliberate,
+because a background poller makes fixtures race and failures depend on timing. That decision
+removed the only condition under which the bug reproduces. Disabling the thing that would have
+caught it is worth remembering as a category, not just as this instance.
+
+**The fix** is the same conditional-update pattern used for the relay's own lease and the OTP
+attempt counter: the claim lives in the `WHERE` clause, so Postgres arbitrates it. The second
+updater blocks on the row lock, re-evaluates `transactionId IS NULL` after the first commits, and
+matches nothing. Losing throws `ObservationAlreadyAdmitted`, which rolls back the transaction the
+loser had already created — an exception rather than a return value precisely because that rollback
+is the point.
+
+Checking `transactionId === null` and then writing remains in place as a cheap short-circuit for
+ordinary redelivery, but it is explicitly **not** the guarantee.
+
+The race is now driven explicitly in `reconciliation.integration.test.ts` — two `handle()` calls on
+one event — which is deterministic and needs no relay. It was verified by reverting the fix and
+watching it fail with two transactions, then restoring it. A test for a concurrency bug that has
+never been seen to fail is not yet a test.
 
 ## The outbox relay
 

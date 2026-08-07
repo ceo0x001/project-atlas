@@ -10,7 +10,7 @@ import { TRANSACTION_OBSERVED, type TransactionObservedEvent } from '@shared/eve
 import { DomainEventBus, type DomainEventHandler } from '@shared/events/domain-event-bus';
 import { TenantScope, type TenantClient } from '@shared/prisma/tenant-scope';
 import type { ObservationFacts } from '../domain/reconciliation/observation-facts';
-import { ReconciliationService } from './reconciliation.service';
+import { ObservationAlreadyAdmitted, ReconciliationService } from './reconciliation.service';
 
 /**
  * Admits observations into the books.
@@ -47,6 +47,22 @@ export class TransactionAdmissionService
   }
 
   async handle(event: TransactionObservedEvent): Promise<void> {
+    try {
+      await this.admit(event);
+    } catch (error) {
+      // Losing the race is the expected outcome for one of two concurrent handlers, and the
+      // winner has already done the work. Anything else is a real failure and must propagate so
+      // the outbox retries it.
+      if (error instanceof ObservationAlreadyAdmitted) {
+        this.logger.debug(error.message);
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  private async admit(event: TransactionObservedEvent): Promise<void> {
     const { payload } = event;
 
     await this.tenantScope.run(event.userId, async (tx) => {
@@ -73,8 +89,9 @@ export class TransactionAdmissionService
         throw new Error(`Observation ${payload.observationId} not found`);
       }
 
-      // Idempotency. Delivery is at-least-once, so a redelivered event must be a
-      // no-op rather than a second transaction for the same money.
+      // A cheap short-circuit for the common redelivery, not the guarantee. Two handlers can
+      // both pass this check — the in-process dispatch races the outbox relay — so the real
+      // protection is the conditional claim below, which Postgres arbitrates.
       if (stored.transactionId !== null) return;
 
       if (!isCurrencyCode(stored.currency)) {
@@ -173,12 +190,11 @@ export class TransactionAdmissionService
       },
     });
 
-    // The link is what makes the number explainable (invariant I6): every
-    // transaction can name the observations it was assembled from.
-    await tx.transactionObservation.update({
-      where: { id: facts.id },
-      data: { transactionId },
-    });
+    // The link is what makes the number explainable (invariant I6): every transaction can name
+    // the observations it was assembled from. Claimed conditionally, so if another handler got
+    // there first this throws and the transaction created just above is rolled back with it —
+    // otherwise it would survive as an orphan that no observation explains but every total counts.
+    await this.reconciliation.claimObservation(tx, facts.id, transactionId);
 
     this.logger.debug(`Admitted observation ${facts.id} as ${transactionId}`);
 

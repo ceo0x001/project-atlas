@@ -445,3 +445,126 @@ describe('idempotency', () => {
     expect(await liveTransactions()).toHaveLength(first.length);
   });
 });
+
+describe('concurrent delivery of the same event', () => {
+  /**
+   * The bug this closes was found by running the real server, not by a test.
+   *
+   * `StatementImportService` commits its outbox rows and then dispatches in-process, and the
+   * outbox relay claims those same rows on its next tick. Both handlers read
+   * `transactionId === null`, both created a transaction, and the loser's row survived as an
+   * **orphan with no observations that every total still counted** — a live statement import
+   * reported spending twice over.
+   *
+   * The integration suite could not see it: `OutboxRelay` does not start when `NODE_ENV=test`,
+   * which is deliberate for determinism and removed the only condition that reproduces the race.
+   * So the race is driven explicitly here instead, which is both deterministic and faster.
+   */
+  it('creates exactly one transaction when two handlers race the same event', async () => {
+    observationSeed += 1;
+    const observationId = idFromSeed<'ObservationId'>(11_800 + observationSeed);
+    const occurredAt = new Date('2026-08-20T10:00:00Z');
+
+    await owner.transactionObservation.create({
+      data: {
+        id: observationId,
+        userId,
+        accountId,
+        source: 'SMS',
+        amountMinor: 250_000n,
+        currency: 'NGN',
+        direction: 'DEBIT',
+        occurredAt,
+        observedAt: occurredAt,
+        balanceAfterMinor: 1_000_000n,
+        description: 'RACED PURCHASE',
+        dedupeKey: `${'0'.repeat(58)}${(9000 + observationSeed).toString(16).padStart(6, '0')}`,
+      },
+    });
+
+    const event: TransactionObservedEvent = {
+      id: idFromSeed<'EventId'>(12_800 + observationSeed),
+      type: TRANSACTION_OBSERVED,
+      userId,
+      occurredAt: new Date(),
+      payload: {
+        observationId,
+        source: 'SMS',
+        accountId,
+        institutionId: null,
+        deviceId: null,
+        amountMinor: '250000',
+        currency: 'NGN',
+        direction: 'DEBIT',
+        occurredAt: occurredAt.toISOString(),
+        balanceAfterMinor: '1000000',
+        description: 'RACED PURCHASE',
+      },
+    };
+
+    // Both handlers see an unclaimed observation. Postgres arbitrates the claim; the loser must
+    // roll back the transaction it had already created rather than leave it behind.
+    const outcomes = await Promise.allSettled([admission.handle(event), admission.handle(event)]);
+
+    // Neither call may surface an error: losing the race is an expected outcome, not a failure,
+    // and a rejection here would make the outbox retry work that was already done.
+    expect(outcomes.map((o) => o.status)).toEqual(['fulfilled', 'fulfilled']);
+
+    const live = await liveTransactions();
+    expect(live).toHaveLength(1);
+    expect(live[0]?.amountMinor).toBe(250_000n);
+
+    // The orphan check: every transaction must be explained by at least one observation.
+    const orphans = await owner.transaction.findMany({
+      where: { userId, observations: { none: {} } },
+    });
+    expect(orphans).toEqual([]);
+
+    // And the total must be the money that actually moved, once.
+    const result = await repository.aggregate({
+      ...plan(),
+      filter: {
+        ...plan().filter,
+        occurredFrom: new Date('2026-08-20T00:00:00Z'),
+        occurredTo: new Date('2026-08-20T23:59:59Z'),
+      },
+    });
+    expect(result.rows[0]?.total.minor).toBe(250_000n);
+  });
+
+  it('is still a no-op on plain sequential redelivery', async () => {
+    await observe({
+      source: 'SMS',
+      amountMinor: 125_000n,
+      occurredAt: '2026-08-21T10:00:00Z',
+      balanceAfterMinor: 900_000n,
+    });
+
+    const before = await liveTransactions();
+    const observation = await owner.transactionObservation.findFirstOrThrow({
+      where: { userId, amountMinor: 125_000n },
+    });
+
+    await admission.handle({
+      id: idFromSeed<'EventId'>(12_950),
+      type: TRANSACTION_OBSERVED,
+      userId,
+      occurredAt: new Date(),
+      payload: {
+        observationId: observation.id as never,
+        source: 'SMS',
+        accountId,
+        institutionId: null,
+        deviceId: null,
+        amountMinor: '125000',
+        currency: 'NGN',
+        direction: 'DEBIT',
+        occurredAt: '2026-08-21T10:00:00Z',
+        balanceAfterMinor: '900000',
+        description: null,
+      },
+    });
+
+    expect(await liveTransactions()).toHaveLength(before.length);
+  });
+});
