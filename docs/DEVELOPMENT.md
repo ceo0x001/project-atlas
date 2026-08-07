@@ -5,7 +5,7 @@
 | Piece                    | State                                                                                                   |
 | ------------------------ | ------------------------------------------------------------------------------------------------------- |
 | `packages/shared-kernel` | Builds, 66 tests, lint clean                                                                            |
-| `apps/api`               | Builds, boots, 410 unit tests + 78 integration, lint clean                                              |
+| `apps/api`               | Builds, boots, 420 unit tests + 115 integration, lint clean                                             |
 | SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                           |
 | Ledger                   | Read path, admission, balance anchoring; RLS enforced and proven                                        |
 | Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                                     |
@@ -15,8 +15,8 @@
 | Agent loop               | Complete — tool loop, grounding escalation, turn persistence, 19 integration tests                      |
 | `POST /v1/chat`          | Complete, device-authenticated                                                                          |
 | **Live, end to end**     | **Working on two-tier routing** — Haiku 4.5 answers, Opus 5 on escalation                               |
-| Reconciliation           | **Working** — projection, matching, supersession; two sources collapse to one transaction               |
-| Durable outbox relay     | Not started (M2, Temporal)                                                                              |
+| Reconciliation           | **Complete** — matching, merge, split, gap detection, and endpoints to answer questions                 |
+| Durable outbox relay     | **Working** — leased claim with `SKIP LOCKED`, backoff, dead-letter, pruning (no Temporal)              |
 | User authentication      | Not started — no HTTP device-enrolment route yet, deliberately                                          |
 | `apps/mobile`            | `flutter analyze` + `flutter test` **green in CI**; never compiled locally (no SDK)                     |
 | CI                       | **Green** since the first run — Backend ~1.5 min, Mobile ~2 min ([ci.yml](../.github/workflows/ci.yml)) |
@@ -50,6 +50,63 @@ CI with an error that looks like a code defect, and the instinct will be to debu
 code rather than the workflow. Either drop the variable until something needs it, or add
 the service container in the same commit as the code that dials it, where the reason is
 self-evident.
+
+## The outbox relay
+
+`OutboxWriter` always guaranteed that "the state changed" and "an event was recorded" commit
+together. What was missing was anything that **retried**: a process dying between that commit
+and the in-process dispatch left the row undelivered forever — a user's transaction that
+simply never appears. `shared/events/outbox-relay.service.ts` closes that.
+
+It is **not** a Temporal workflow, and [ADR-007 is amended](adr/007-temporal-day-one.md)
+rather than quietly contradicted. The outbox table already _is_ the durable state, so a
+workflow would be a second durable store able to disagree with the row it describes; and a
+relay is high-frequency infrastructure where one workflow per SMS alert does not survive
+scale. Temporal arrives with statement import, the first process that genuinely earns it.
+
+### Claim by lease, not by holding a lock
+
+The obvious implementation keeps the claiming transaction open while handlers run — which
+holds row locks for the duration of handler work, while handlers open their own
+tenant-scoped transactions. A good way to exhaust the pool or deadlock.
+
+Instead a short transaction stamps `nextAttemptAt = now + lease` on the claimed rows and
+commits; dispatch then happens with no locks held. `FOR UPDATE SKIP LOCKED` means several API
+instances take disjoint sets rather than contending, and there is a test that runs two relays
+concurrently and asserts no event reaches both.
+
+**`attempts` is incremented at claim time, not on failure.** A crash during dispatch would
+otherwise never count against the budget, so an event that reliably kills the process would
+be retried forever. Dead-lettering is likewise driven from the attempt count rather than from
+a failure handler — that is precisely the case it most needs to cover.
+
+### Deliberate choices
+
+- **Duplicate delivery is expected.** The fast in-process dispatch stays, because waiting a
+  poll interval would add latency to every alert; the relay is the safety net, not the
+  primary path. Handlers are idempotent, which is what makes that safe.
+- **A dead-lettered row is kept, never deleted.** An event that could not be delivered is a
+  fact someone needs to see; deleting it turns a loud failure into a silent one.
+- **Pruning only ever touches delivered rows.** The outbox is a queue, not an archive — but
+  an undelivered row is the backlog, and deleting it would lose the state change.
+- **No jitter in the backoff.** A row is claimed by exactly one relay and the batch size caps
+  what is in flight, so lockstep retries cannot happen. Determinism is worth more here: a
+  row's next attempt is predictable from its state, which is what makes a stuck backlog
+  diagnosable.
+- **Ordering is only roughly causal.** Concurrent instances and retries can reorder. Safe
+  because handlers are idempotent and the balance anchor is guarded on `balanceAsOf` rather
+  than assuming arrival order.
+- **The backlog index is partial** (`WHERE "publishedAt" IS NULL`). This table grows with all
+  history while the working set stays tiny, so a full index would cost storage proportional
+  to everything ever emitted rather than to the backlog.
+
+### The index-drop trap got subtler
+
+Prisma emitted three `DROP INDEX` statements for this migration and **one of them was
+correct** — the old composite index genuinely was replaced by the partial one. Blanket
+stripping every drop, which is what the previous guidance implied, would have left a dead
+index behind forever. `sql/managed-indexes.sql` now says to match on the index _names_ it
+defines rather than on the statement.
 
 ## Reconciliation (M2)
 

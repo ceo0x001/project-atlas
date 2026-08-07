@@ -12,7 +12,11 @@
 --
 -- Two defences, deliberately overlapping:
 --
---   1. Delete the `DROP INDEX` lines from the generated migration.
+--   1. Delete the `DROP INDEX` lines from the generated migration — but only those
+--      naming an index defined *in this file*. Prisma also emits legitimate drops when
+--      you intentionally remove an index from `schema.prisma`, and stripping those too
+--      would leave dead indexes behind forever. Match on the names below, not on the
+--      statement.
 --   2. Append this file to it anyway. Every statement is `IF NOT EXISTS`, so it is
 --      safe to run repeatedly and it self-heals if step 1 was missed — the index is
 --      simply rebuilt inside the same transaction.
@@ -30,3 +34,16 @@ CREATE INDEX IF NOT EXISTS episodes_embedding_hnsw
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS transactions_description_trgm
   ON transactions USING gin (description gin_trgm_ops);
+
+-- Outbox backlog. Partial on purpose: `outbox_events` accumulates every event ever
+-- emitted, while the rows the relay cares about are only the undelivered ones. A full
+-- index would grow with all history; this one stays proportional to the backlog, which
+-- is what keeps the claim query cheap at scale.
+CREATE INDEX IF NOT EXISTS outbox_events_backlog
+  ON outbox_events ("nextAttemptAt", "occurredAt")
+  WHERE "publishedAt" IS NULL AND "deadLetteredAt" IS NULL;
+
+-- Supports pruning delivered rows without scanning the whole table.
+CREATE INDEX IF NOT EXISTS outbox_events_published_at
+  ON outbox_events ("publishedAt")
+  WHERE "publishedAt" IS NOT NULL;

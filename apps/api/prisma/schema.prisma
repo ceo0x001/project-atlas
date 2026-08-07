@@ -909,7 +909,21 @@ model OutboxEvent {
   attempts    Int       @default(0)
   lastError   String?
 
-  @@index([publishedAt, occurredAt])
+  /// Not eligible for delivery before this time. Serves two purposes with one column:
+  /// after a failure it is the retry schedule, and at claim time the relay sets it to
+  /// now + lease so a second relay instance will not pick the row up while the first is
+  /// still working. Null means eligible immediately.
+  nextAttemptAt DateTime? @db.Timestamptz(3)
+
+  /// Set when the relay gave up. The row is kept, never deleted: an event that could not
+  /// be delivered is a fact someone needs to see, and deleting it would turn a loud
+  /// failure into a silent one.
+  deadLetteredAt DateTime? @db.Timestamptz(3)
+
   @@index([aggregateType, aggregateId])
+  /// The backlog index is a *partial* index in `sql/managed-indexes.sql`, covering only
+  /// unpublished rows. This table grows without bound while the working set stays tiny,
+  /// so indexing delivered rows would cost storage proportional to all history rather
+  /// than to the backlog.
   @@map("outbox_events")
 }

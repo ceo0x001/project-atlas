@@ -13,9 +13,10 @@ import type { DomainEvent, EventId } from '@atlas/shared-kernel';
  * them, then dispatched here; a handler that throws leaves its outbox row
  * unpublished for a future relay to retry rather than losing the event.
  *
- * The durable relay itself lands in M2 on Temporal. Until then dispatch happens
- * immediately after commit, which is why a failure is logged loudly: nothing is
- * retrying yet.
+ * Dispatch happens immediately after commit so an alert appears without waiting on a
+ * poll, and `OutboxRelay` retries anything that failed or never ran. An event can
+ * therefore be delivered twice, which is why handlers must be idempotent rather than
+ * merely tolerant.
  */
 
 export interface DomainEventHandler<TEvent extends DomainEvent = DomainEvent> {
