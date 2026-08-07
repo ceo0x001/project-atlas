@@ -1,17 +1,68 @@
 # Development
 
-## What runs today (M0)
+## What runs today (M0 complete, M1 in progress)
 
-| Piece                    | State                                                                                                |
-| ------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `packages/shared-kernel` | Builds, 54 tests pass, lint clean                                                                    |
-| `apps/api`               | Builds, boots, 14 tests pass, lint clean; `/health/live` 200, `/health/ready` 503 without a database |
-| Prisma schema            | Validates; client generates. **No migration has been run** — no Postgres available yet               |
-| `docker-compose.yml`     | Written, **never executed** — Docker is not installed                                                |
-| `apps/mobile`            | Dart sources written, **never compiled** — Flutter is not installed                                  |
-| CI                       | Written, not yet run                                                                                 |
+| Piece                    | State                                                                                                 |
+| ------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `packages/shared-kernel` | Builds, 54 tests pass, lint clean                                                                     |
+| `apps/api`               | Builds, boots, 186 tests pass, lint clean; `/health/live` 200, `/health/ready` 503 without a database |
+| SMS template engine      | Complete and tested — parsing, transforms, validation gate, dedupe keys (M1)                          |
+| Ledger query compiler    | Complete and tested — plan validation and parameterised SQL generation (M1)                           |
+| Prisma schema            | Validates; client generates. **No migration has been run** — no Postgres available yet                |
+| Ledger repository        | Not started — needs Postgres                                                                          |
+| Reconciliation           | Not started (M2)                                                                                      |
+| `docker-compose.yml`     | Written, **never executed** — Docker is not installed                                                 |
+| `apps/mobile`            | Dart sources written, **never compiled** — Flutter is not installed                                   |
+| CI                       | Written, not yet run                                                                                  |
 
-Nothing above is claimed to work beyond what that table says.
+Nothing above is claimed to work beyond what that table says. In particular the
+query compiler generates SQL that has **never been executed against Postgres** —
+its tests assert the generated string and bind parameters, not that the database
+accepts them.
+
+## The M1 core, and what it guarantees
+
+Two pieces carry most of the product risk, so both are pure functions with no
+infrastructure dependency and heavy test coverage.
+
+### SMS template engine (`modules/ingestion/domain/parsing`)
+
+Deterministic parsing of bank alerts against templates delivered as data (ADR-004).
+Claude authors candidate templates offline; only this engine runs in production, and
+it never guesses — a message either parses exactly or fails with a reason.
+
+Three things worth knowing:
+
+- **Date formats are explicit, never inferred.** `07/08/2026` is 7 August or
+  8 July depending on convention, and both parse cleanly. Templates must state the
+  format, and fixtures prove it.
+- **Timestamps carry an institution offset.** Bank alerts state local wall-clock
+  time with no zone. Africa/Lagos is UTC+1 with no DST, so a fixed offset is exact —
+  but expanding to a DST zone needs a real IANA database, not a wider number.
+- **A matched-but-broken template fails loudly** rather than falling through to an
+  older version. Falling through risks a different, subtly wrong reading of the same
+  message, and it would waste the template flywheel on a defect that is not a new
+  bank format.
+
+The validator is the publication gate and doubles as a security control: templates
+are LLM-authored regex executed on user phones, so it rejects nested quantifiers
+(catastrophic backtracking would pin a CPU and drain a battery as _configuration_),
+backreferences, and any template whose fixtures do not pass.
+
+### Ledger query compiler (`modules/ledger`)
+
+Turns a validated `LedgerQueryPlan` into parameterised SQL. This is where
+model-authored input meets the database, so: no value is ever interpolated, every
+identifier comes from an allowlist, and money aggregates are cast to `text` and
+parsed as BigInt. `AVG()` is deliberately unused — averages are derived in `Money`
+with explicit rounding (invariant I2).
+
+Two traps the tests pin down:
+
+- **Ordering uses the numeric aggregate, not the `::text` alias.** Sorting `'9'`
+  against `'1000'` as text inverts every "what did I spend most on" answer.
+- **`ILIKE` patterns escape LIKE metacharacters.** Without it, searching for `50%`
+  matches every transaction.
 
 ## Prerequisites
 

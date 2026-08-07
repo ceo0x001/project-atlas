@@ -38,10 +38,20 @@ const boundaryConfigs = MODULES.map((moduleName) => {
       'no-restricted-imports': [
         'error',
         {
+          /**
+           * Patterns key on the *module name* rather than on path depth.
+           *
+           * An earlier version banned `../../*` outright to stop relative escapes,
+           * but that cannot distinguish climbing within a module
+           * (`infrastructure/sql` -> its own `domain`) from escaping into a sibling.
+           * Matching the module name catches `../../memory/...` and
+           * `@modules/memory` alike, while leaving a module free to navigate its
+           * own directories.
+           */
           patterns: [
             // Modules this context is not allowed to know about at all.
             ...forbidden.map((m) => ({
-              group: [`**/modules/${m}`, `**/modules/${m}/**`, `@modules/${m}`, `@modules/${m}/*`],
+              group: [`@modules/${m}`, `@modules/${m}/*`, `**/${m}`, `**/${m}/**`],
               message:
                 `Boundary violation: '${moduleName}' may not import '${m}'. ` +
                 `Communicate through a domain event on the outbox instead, or amend ` +
@@ -49,18 +59,11 @@ const boundaryConfigs = MODULES.map((moduleName) => {
             })),
             // Allowed modules may only be reached through their public barrel.
             ...allowed.map((m) => ({
-              group: [`@modules/${m}/*`, `**/modules/${m}/**`],
+              group: [`@modules/${m}/*`, `**/${m}/**`],
               message:
                 `Deep import into '${m}' is not allowed. Import the public barrel ` +
                 `'@modules/${m}' so its internals stay replaceable.`,
             })),
-            // Relative escapes defeat the alias-based boundary check above.
-            {
-              group: ['../../*', '../../../*', '../../../../*'],
-              message:
-                `Use the '@modules/*', '@shared/*' or '@atlas/shared-kernel' aliases ` +
-                `instead of climbing out of the module with relative paths.`,
-            },
           ],
         },
       ],

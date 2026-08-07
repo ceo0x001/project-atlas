@@ -46,6 +46,14 @@ export interface LedgerQueryPlan {
   readonly metrics: readonly LedgerMetric[];
   readonly sort?: { readonly by: LedgerMetric; readonly direction: 'asc' | 'desc' };
   readonly limit?: number;
+  /**
+   * IANA timezone used to bucket day/week/month groupings.
+   *
+   * Not cosmetic: bucketing in UTC files a 23:30 Lagos purchase under the previous
+   * day, so "how much did I spend today" would silently disagree with the user's
+   * own memory of today.
+   */
+  readonly timezone: string;
 }
 
 export interface LedgerAggregateRow {
