@@ -2,24 +2,24 @@
 
 ## What runs today (M1 complete — Atlas answers questions)
 
-| Piece                    | State                                                                                         |
-| ------------------------ | --------------------------------------------------------------------------------------------- |
-| `packages/shared-kernel` | Builds, 66 tests, lint clean                                                                  |
-| `apps/api`               | Builds, boots, 311 unit tests, lint clean                                                     |
-| SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                 |
-| Ledger                   | Read path, admission, balance anchoring; RLS enforced and proven                              |
-| Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                           |
-| Grounding gate           | Complete — significant-figure rounding rule, 35 tests                                         |
-| Period resolution        | Complete — named periods resolved server-side, DST-correct, 41 tests                          |
-| `query_ledger` tool      | Complete — no model-authored ids, no model date arithmetic, unresolved filters return nothing |
-| Agent loop               | Complete — tool loop, grounding escalation, turn persistence, 19 integration tests            |
-| `POST /v1/chat`          | Complete, device-authenticated                                                                |
-| **Live, end to end**     | **Working against Claude Opus 5** — verified answers from real ledger data                    |
-| Reconciliation           | Not started (M2)                                                                              |
-| Durable outbox relay     | Not started (M2, Temporal)                                                                    |
-| User authentication      | Not started — no HTTP device-enrolment route yet, deliberately                                |
-| `apps/mobile`            | Dart sources written, **never compiled** — Flutter is not installed                           |
-| CI                       | Written with a Postgres service, **not yet run** — nothing has been pushed                    |
+| Piece                    | State                                                                                          |
+| ------------------------ | ---------------------------------------------------------------------------------------------- |
+| `packages/shared-kernel` | Builds, 66 tests, lint clean                                                                   |
+| `apps/api`               | Builds, boots, 319 unit tests, lint clean                                                      |
+| SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                  |
+| Ledger                   | Read path, admission, balance anchoring; RLS enforced and proven                               |
+| Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                            |
+| Grounding gate           | Complete — significant-figure rounding rule, 35 tests                                          |
+| Period resolution        | Complete — named periods resolved server-side, DST-correct, 41 tests                           |
+| `query_ledger` tool      | Complete — no model-authored ids, no model date arithmetic, unresolved filters return nothing  |
+| Agent loop               | Complete — tool loop, grounding escalation, turn persistence, 19 integration tests             |
+| `POST /v1/chat`          | Complete, device-authenticated                                                                 |
+| **Live, end to end**     | **Working on two-tier routing** — Haiku 4.5 answers, Opus 5 on escalation                      |
+| Reconciliation           | Not started (M2)                                                                               |
+| Durable outbox relay     | Not started (M2, Temporal)                                                                     |
+| User authentication      | Not started — no HTTP device-enrolment route yet, deliberately                                 |
+| `apps/mobile`            | `flutter analyze` + `flutter test` **green in CI**; never compiled locally (no SDK)            |
+| CI                       | **Green on first run** — Backend 1.5 min, Mobile 2 min ([ci.yml](../.github/workflows/ci.yml)) |
 
 ### Talking to Atlas from the terminal
 
@@ -30,6 +30,26 @@ node apps/api/dist/cli/ask.js --user <userId> "how much did I spend this month?"
 
 Runs the real loop against the real ledger and the real model. A development tool,
 not a product surface — it bypasses HTTP and device auth by design.
+
+## CI
+
+Green on its first run against a clean `ubuntu-latest`: `pnpm install --frozen-lockfile`,
+format/lint/typecheck, build, `prisma migrate deploy` (which applies the row-level
+security policies and the managed-index safeguard, not just the schema), then the
+integration suite against a fresh `pgvector/pgvector:pg17`. Backend 1.5 min, Mobile 2 min.
+
+That first run is the only real evidence the stack builds anywhere but this laptop —
+`pgcrypto` is present in the pg17 contrib set, the migration ordering holds, and the
+Flutter sources in `apps/mobile` do actually analyse and test, which had never been
+executed anywhere before.
+
+**The workflow currently declares `REDIS_URL` but provisions no Redis service.** It
+passes only because nothing opens a connection yet — the env schema validates the URL as
+a string, it never dials it. The first code that actually reaches for Redis will fail in
+CI with an error that looks like a code defect, and the instinct will be to debug the
+code rather than the workflow. Either drop the variable until something needs it, or add
+the service container in the same commit as the code that dials it, where the reason is
+self-evident.
 
 ## Measured on real data — model routing
 
