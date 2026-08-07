@@ -1,0 +1,90 @@
+# Local development infrastructure.
+#
+# NOTE: this file has not been executed yet — Docker is not installed on the
+# development machine (see docs/DEVELOPMENT.md). Image tags are pinned rather than
+# floating on :latest, but expect to adjust them on first run.
+#
+# Start with: pnpm infra:up
+
+name: atlas
+
+services:
+  postgres:
+    # pgvector ships Postgres with the vector extension already built in.
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: atlas
+      POSTGRES_PASSWORD: atlas
+      POSTGRES_DB: atlas
+      # Temporal needs its own databases on the same server.
+      POSTGRES_MULTIPLE_DATABASES: temporal,temporal_visibility
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U atlas -d atlas']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Durable workflows (ADR-007). Single-node auto-setup is fine for development;
+  # production moves to Temporal Cloud when reliability outweighs the invoice.
+  temporal:
+    image: temporalio/auto-setup:1.26.2
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: atlas
+      POSTGRES_PWD: atlas
+      POSTGRES_SEEDS: postgres
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+    ports:
+      - '7233:7233'
+
+  temporal-ui:
+    image: temporalio/ui:2.32.0
+    restart: unless-stopped
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - '8233:8080'
+
+  # Somewhere for OpenTelemetry traces to land locally, so tracing is real from
+  # day 1 rather than a config file nobody has ever seen work.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: 'true'
+    ports:
+      - '16686:16686' # UI
+      - '4318:4318' # OTLP/HTTP — matches OTEL_EXPORTER_OTLP_ENDPOINT
+
+volumes:
+  postgres-data:
+  redis-data:

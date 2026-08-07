@@ -1,0 +1,8 @@
+node_modules
+dist
+.turbo
+coverage
+pnpm-lock.yaml
+apps/mobile/build
+apps/mobile/.dart_tool
+apps/api/prisma/migrations

@@ -1,0 +1,18 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# pnpm requires explicit approval before a dependency may run install scripts.
+# Keep this list as short as possible and justify every entry — an install script
+# is arbitrary code execution on every developer and CI machine.
+allowBuilds:
+  # Vitest's transpiler; postinstall links the platform-native binary.
+  esbuild: true
+  # Native binary for SWC, which supplies decorator metadata to vitest.
+  '@swc/core': true
+  # Prisma's postinstall generates the typed client and fetches query engines.
+  '@prisma/client': true
+  '@prisma/engines': true
+  prisma: true
+  # Denied: only needed for the OTLP/gRPC exporter, and we export over HTTP.
+  protobufjs: false

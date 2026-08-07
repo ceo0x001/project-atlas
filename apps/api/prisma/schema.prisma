@@ -1,0 +1,743 @@
+// Atlas database schema.
+//
+// Reading order: identity -> ledger -> ingestion -> intelligence -> memory ->
+// conversation -> infrastructure. Grouping mirrors the bounded contexts in
+// ARCHITECTURE §4; Prisma has no notion of modules, so the boundary is enforced in
+// application code (eslint.config.mjs) rather than here.
+//
+// Conventions:
+//  - Ids are ULIDs (String), client-generatable for offline-first sync.
+//  - Money is `BigInt` minor units + a currency code. Never Float, never Decimal
+//    (ADR-003). A schema guard test enforces this.
+//  - Timestamps are `DateTime` (timestamptz); the app always works in UTC and
+//    renders in the user's timezone.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector, pgcrypto]
+}
+
+// ============================================================================
+// identity
+// ============================================================================
+
+model User {
+  id              String    @id
+  phoneE164       String    @unique
+  email           String?   @unique
+  displayName     String?
+  locale          String    @default("en-NG")
+  timezone        String    @default("Africa/Lagos")
+  primaryCurrency String    @default("NGN")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deactivatedAt   DateTime?
+
+  accounts            Account[]
+  devices             Device[]
+  consents            Consent[]
+  transactions        Transaction[]
+  observations        TransactionObservation[]
+  categories          Category[]
+  merchants           Merchant[]
+  parseFailures       ParseFailure[]
+  statementImports    StatementImport[]
+  insights            Insight[]
+  recurringSeries     RecurringSeries[]
+  facts               Fact[]
+  episodes            Episode[]
+  conversations       ConversationSession[]
+
+  @@map("users")
+}
+
+enum DevicePlatform {
+  ANDROID
+  IOS
+}
+
+/// An Android device can observe SMS; an iOS device cannot (ADR-006). Separating the
+/// roles is what lets a user run an Android ingestion node alongside an iOS client.
+enum DeviceRole {
+  CLIENT
+  INGESTION_NODE
+  CLIENT_AND_INGESTION_NODE
+}
+
+model Device {
+  id         String         @id
+  userId     String
+  platform   DevicePlatform
+  role       DeviceRole
+  model      String?
+  osVersion  String?
+  appVersion String?
+  pushToken  String?
+  lastSeenAt DateTime?
+  createdAt  DateTime       @default(now())
+  revokedAt  DateTime?
+
+  user         User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  observations TransactionObservation[]
+
+  @@index([userId])
+  @@map("devices")
+}
+
+enum ConsentScope {
+  SMS_READ
+  RAW_TEXT_UPLOAD
+  EMAIL_FORWARDING
+  PUSH_NOTIFICATIONS
+  ANALYTICS
+}
+
+/// NDPR posture: every consent is an auditable record with a timestamp and the
+/// policy version it was granted against. Revocation is a new state, not a delete.
+model Consent {
+  id            String       @id
+  userId        String
+  scope         ConsentScope
+  policyVersion String
+  grantedAt     DateTime     @default(now())
+  revokedAt     DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, scope])
+  @@map("consents")
+}
+
+// ============================================================================
+// ledger — the deterministic core
+// ============================================================================
+
+/// Shared reference data (not user-scoped): banks and their SMS sender ids.
+model Institution {
+  id           String   @id
+  name         String
+  shortName    String
+  country      String   @default("NG")
+  smsSenderIds String[]
+  logoUrl      String?
+  createdAt    DateTime @default(now())
+
+  accounts       Account[]
+  observations   TransactionObservation[]
+  parseTemplates ParseTemplate[]
+  parseFailures  ParseFailure[]
+
+  @@map("institutions")
+}
+
+enum AccountType {
+  CURRENT
+  SAVINGS
+  DOMICILIARY
+  WALLET
+  CASH
+  CREDIT_CARD
+}
+
+model Account {
+  id            String      @id
+  userId        String
+  institutionId String?
+  label         String
+  type          AccountType
+  currency      String
+
+  /// Encrypted at the field level; only the last four digits are stored in clear
+  /// so the UI can disambiguate accounts without holding the full number.
+  accountNumberEnc    Bytes?
+  accountNumberLast4  String?
+
+  /// Cached projection of the ledger, refreshed on write. Balances are always
+  /// recomputable from transactions — this is an optimisation, not a source of truth.
+  currentBalanceMinor BigInt?
+  balanceAsOf         DateTime?
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user         User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  institution  Institution?             @relation(fields: [institutionId], references: [id])
+  transactions Transaction[]
+  observations TransactionObservation[]
+  imports      StatementImport[]
+
+  @@index([userId])
+  @@map("accounts")
+}
+
+enum TransactionDirection {
+  DEBIT
+  CREDIT
+}
+
+enum TransactionStatus {
+  PENDING
+  POSTED
+  REVERSED
+}
+
+enum CategorySource {
+  RULE
+  MODEL
+  USER
+}
+
+/// The canonical transaction: exactly one per real-world money movement, assembled
+/// from one or more observations by reconciliation (ARCHITECTURE §5.1).
+model Transaction {
+  id        String @id
+  userId    String
+  accountId String
+
+  amountMinor BigInt
+  currency    String
+  direction   TransactionDirection
+  occurredAt  DateTime
+  bookedAt    DateTime?
+
+  description String
+  narration   String?
+
+  /// Balance reported by the source after this transaction. Present for most
+  /// Nigerian bank SMS alerts, and the anchor that lets reconciliation verify
+  /// ledger arithmetic and detect missing transactions.
+  balanceAfterMinor BigInt?
+
+  merchantId         String?
+  categoryId         String?
+  categorySource     CategorySource?
+  categoryConfidence Float?
+
+  recurringSeriesId String?
+  status            TransactionStatus @default(POSTED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user            User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account         Account                  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  merchant        Merchant?                @relation(fields: [merchantId], references: [id])
+  category        Category?                @relation(fields: [categoryId], references: [id])
+  recurringSeries RecurringSeries?         @relation(fields: [recurringSeriesId], references: [id])
+  observations    TransactionObservation[]
+  insightEvidence InsightEvidence[]
+
+  @@index([userId, occurredAt(sort: Desc)])
+  @@index([userId, accountId, occurredAt(sort: Desc)])
+  @@index([userId, categoryId, occurredAt(sort: Desc)])
+  @@index([userId, merchantId, occurredAt(sort: Desc)])
+  @@map("transactions")
+}
+
+enum ObservationSource {
+  SMS
+  EMAIL
+  STATEMENT
+  USER_STATED
+  AGGREGATOR
+}
+
+/// An immutable claim that a transaction happened, from one source. Never edited:
+/// corrections create new observations, so every merge decision stays reversible
+/// and every canonical transaction can explain where it came from (invariant I6).
+model TransactionObservation {
+  id     String @id
+  userId String
+
+  /// Null until reconciliation assigns this observation to a canonical transaction.
+  transactionId String?
+  accountId     String?
+  institutionId String?
+  deviceId      String?
+
+  source      ObservationSource
+  amountMinor BigInt
+  currency    String
+  direction   TransactionDirection
+  occurredAt  DateTime
+
+  balanceAfterMinor BigInt?
+  description       String?
+  rawReference      String?
+
+  /// Deterministic hash of the source content. Makes offline sync idempotent: the
+  /// same SMS replayed from a device can never create a second observation.
+  dedupeKey String
+
+  parsedByTemplateId String?
+  statementImportId  String?
+
+  observedAt DateTime
+  createdAt  DateTime @default(now())
+
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction  Transaction?     @relation(fields: [transactionId], references: [id])
+  account      Account?         @relation(fields: [accountId], references: [id])
+  institution  Institution?     @relation(fields: [institutionId], references: [id])
+  device       Device?          @relation(fields: [deviceId], references: [id])
+  template     ParseTemplate?   @relation(fields: [parsedByTemplateId], references: [id])
+  import       StatementImport? @relation(fields: [statementImportId], references: [id])
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, accountId, occurredAt])
+  @@index([userId, transactionId])
+  @@map("transaction_observations")
+}
+
+/// System categories have a null userId; user-defined categories belong to one user.
+model Category {
+  id       String  @id
+  userId   String?
+  slug     String
+  name     String
+  parentId String?
+  icon     String?
+  color    String?
+  isSystem Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  user         User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent       Category?        @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children     Category[]       @relation("CategoryHierarchy")
+  transactions Transaction[]
+  merchants    Merchant[]
+  series       RecurringSeries[]
+
+  @@unique([userId, slug])
+  @@map("categories")
+}
+
+model Merchant {
+  id                String  @id
+  userId            String?
+  displayName       String
+  normalizedName    String
+  defaultCategoryId String?
+
+  createdAt DateTime @default(now())
+
+  user            User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  defaultCategory Category?         @relation(fields: [defaultCategoryId], references: [id])
+  transactions    Transaction[]
+  series          RecurringSeries[]
+
+  @@unique([userId, normalizedName])
+  @@index([normalizedName])
+  @@map("merchants")
+}
+
+/// FX rates as an exact rational, never a float (ADR-003). Used only for labelled
+/// display aggregation across currencies — never to rewrite a stored amount.
+model FxRate {
+  id              String   @id
+  base            String
+  quote           String
+  rateNumerator   BigInt
+  rateDenominator BigInt
+  asOf            DateTime
+  source          String
+
+  @@unique([base, quote, asOf])
+  @@index([base, quote, asOf(sort: Desc)])
+  @@map("fx_rates")
+}
+
+// ============================================================================
+// ingestion
+// ============================================================================
+
+enum IngestionChannel {
+  SMS
+  EMAIL
+}
+
+enum TemplateStatus {
+  DRAFT
+  PUBLISHED
+  RETIRED
+}
+
+enum TemplateAuthor {
+  SYSTEM
+  LLM
+  HUMAN
+}
+
+/// Parse templates are data, not code (ADR-004): a new bank message format ships
+/// without an app release. Candidates may be LLM-authored, but what runs in
+/// production is always a deterministic, fixture-validated template.
+model ParseTemplate {
+  id            String           @id
+  institutionId String
+  channel       IngestionChannel
+  version       Int
+  name          String
+
+  matchPattern String
+  fieldMap     Json
+  fixtures     Json
+
+  status    TemplateStatus @default(DRAFT)
+  author    TemplateAuthor @default(SYSTEM)
+  createdAt DateTime       @default(now())
+  publishedAt DateTime?
+  retiredAt   DateTime?
+
+  institution      Institution              @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  observations     TransactionObservation[]
+  resolvedFailures ParseFailure[]
+
+  @@unique([institutionId, channel, version])
+  @@index([status, channel])
+  @@map("parse_templates")
+}
+
+/// A message from a known bank sender that no template matched. Raw text is stored
+/// only when the user explicitly consented for that event (invariant I4); otherwise
+/// only the hash is kept, which is still enough to count and cluster failures.
+model ParseFailure {
+  id            String  @id
+  userId        String
+  institutionId String?
+  senderId      String
+
+  channel        IngestionChannel
+  textHash       String
+  redactedText   String?
+  consentGranted Boolean          @default(false)
+
+  resolvedByTemplateId String?
+  resolvedAt           DateTime?
+  createdAt            DateTime  @default(now())
+
+  user               User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  institution        Institution?   @relation(fields: [institutionId], references: [id])
+  resolvedByTemplate ParseTemplate? @relation(fields: [resolvedByTemplateId], references: [id])
+
+  @@index([senderId, createdAt])
+  @@index([userId, createdAt])
+  @@map("parse_failures")
+}
+
+enum StatementImportStatus {
+  PENDING
+  PARSING
+  RECONCILING
+  COMPLETED
+  FAILED
+  /// Parsed rows did not reconcile against the statement's own opening/closing
+  /// balance. Rejected wholesale rather than imported partially (ARCHITECTURE §6.3).
+  REJECTED
+}
+
+model StatementImport {
+  id        String  @id
+  userId    String
+  accountId String?
+
+  objectKey String
+  filename  String
+  mimeType  String
+  byteSize  Int
+
+  status           StatementImportStatus @default(PENDING)
+  rowCount         Int?
+  observationCount Int?
+
+  openingBalanceMinor BigInt?
+  closingBalanceMinor BigInt?
+  reconciled          Boolean @default(false)
+
+  failureReason String?
+  workflowId    String?
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  user         User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account      Account?                 @relation(fields: [accountId], references: [id])
+  observations TransactionObservation[]
+
+  @@index([userId, createdAt])
+  @@map("statement_imports")
+}
+
+// ============================================================================
+// intelligence
+// ============================================================================
+
+enum InsightType {
+  SPENDING_ANOMALY
+  RECURRING_DETECTED
+  RECURRING_MISSED
+  LOW_BALANCE_BEFORE_PAYDAY
+  BALANCE_DISCONTINUITY
+  GOAL_PROGRESS
+  WEEKLY_DIGEST
+  CATEGORY_TREND
+}
+
+enum InsightSeverity {
+  INFO
+  NOTABLE
+  URGENT
+}
+
+enum InsightStatus {
+  NEW
+  SEEN
+  ACTED
+  DISMISSED
+}
+
+model Insight {
+  id       String          @id
+  userId   String
+  type     InsightType
+  severity InsightSeverity @default(INFO)
+
+  title   String
+  body    String
+  payload Json
+
+  status      InsightStatus @default(NEW)
+  generatedAt DateTime      @default(now())
+  expiresAt   DateTime?
+
+  /// Stable key so a re-run of the same detection does not produce duplicates.
+  dedupeKey String
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  evidence InsightEvidence[]
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, status, generatedAt(sort: Desc)])
+  @@map("insights")
+}
+
+/// Invariant I6: an insight is not shippable unless it can point at the exact
+/// transactions that justify it.
+model InsightEvidence {
+  insightId     String
+  transactionId String
+  /// Denormalised so every user-scoped table carries an identical RLS policy.
+  /// A uniform policy shape is auditable; a mix of direct and EXISTS-based
+  /// policies is where cross-tenant leaks hide.
+  userId        String
+  position      Int
+  note          String?
+
+  insight     Insight     @relation(fields: [insightId], references: [id], onDelete: Cascade)
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@id([insightId, transactionId])
+  @@index([transactionId])
+  @@map("insight_evidence")
+}
+
+enum RecurrenceCadence {
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  QUARTERLY
+  ANNUAL
+  IRREGULAR
+}
+
+model RecurringSeries {
+  id         String  @id
+  userId     String
+  merchantId String?
+  categoryId String?
+  label      String
+
+  cadence      RecurrenceCadence
+  intervalDays Int?
+
+  expectedAmountMinor BigInt
+  currency            String
+
+  lastSeenAt     DateTime
+  nextExpectedAt DateTime?
+  confidence     Float
+  isActive       Boolean   @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  merchant     Merchant?     @relation(fields: [merchantId], references: [id])
+  category     Category?     @relation(fields: [categoryId], references: [id])
+  transactions Transaction[]
+
+  @@index([userId, nextExpectedAt])
+  @@map("recurring_series")
+}
+
+// ============================================================================
+// memory
+// ============================================================================
+
+enum FactSource {
+  USER_STATED
+  INFERRED
+  DERIVED
+}
+
+/// Append-only, versioned structured memory (invariant I5). A correction never
+/// mutates a row: it writes a new version and closes the old one, so the assistant
+/// can always answer "what did you believe, and when did you start believing it?".
+model Fact {
+  id        String @id
+  userId    String
+  subject   String
+  predicate String
+  value     Json
+
+  confidence Float      @default(1)
+  source     FactSource
+  provenance Json?
+
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+  supersededById String?  @unique
+
+  createdAt DateTime @default(now())
+
+  user        User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  supersededBy Fact? @relation("FactVersions", fields: [supersededById], references: [id])
+  supersedes   Fact? @relation("FactVersions")
+
+  @@index([userId, subject, predicate, effectiveFrom(sort: Desc)])
+  @@map("facts")
+}
+
+/// Episodic memory: a summary of a conversation, embedded for semantic recall.
+/// The vector column is `Unsupported` because Prisma cannot express pgvector types;
+/// similarity search runs through $queryRaw. The HNSW index lives in the RLS/index
+/// migration alongside the other raw SQL.
+model Episode {
+  id        String   @id
+  userId    String
+  sessionId String?
+  summary   String
+  occurredAt DateTime
+  createdAt DateTime @default(now())
+
+  embedding Unsupported("vector(1024)")?
+
+  user    User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  session ConversationSession? @relation(fields: [sessionId], references: [id])
+
+  @@index([userId, occurredAt(sort: Desc)])
+  @@map("episodes")
+}
+
+// ============================================================================
+// conversation
+// ============================================================================
+
+enum ConversationChannel {
+  VOICE
+  TEXT
+}
+
+model ConversationSession {
+  id        String              @id
+  userId    String
+  deviceId  String?
+  channel   ConversationChannel
+  startedAt DateTime            @default(now())
+  endedAt   DateTime?
+
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  turns    ConversationTurn[]
+  episodes Episode[]
+
+  @@index([userId, startedAt(sort: Desc)])
+  @@map("conversation_sessions")
+}
+
+enum TurnRole {
+  USER
+  ASSISTANT
+  TOOL
+  SYSTEM
+}
+
+/// Outcome of the grounding gate for an assistant turn (ADR-005). Tracked per turn
+/// because a rising DEGRADED rate is the earliest signal of a prompt regression.
+enum GroundingStatus {
+  NOT_APPLICABLE
+  PASSED
+  REGENERATED
+  DEGRADED
+}
+
+model ConversationTurn {
+  id        String   @id
+  sessionId String
+  /// Denormalised from the session so RLS on this high-volume table is a direct
+  /// column comparison rather than a per-row EXISTS subquery.
+  userId    String
+  role      TurnRole
+
+  content     String?
+  toolCalls   Json?
+  toolResults Json?
+
+  groundingStatus GroundingStatus @default(NOT_APPLICABLE)
+
+  model              String?
+  timeToFirstTokenMs Int?
+  latencyMs          Int?
+  inputTokens        Int?
+  outputTokens       Int?
+  /// Cost in millionths of a USD — integer, for the same reason money is (ADR-003).
+  costMicroUsd       Int?
+
+  createdAt DateTime @default(now())
+
+  session ConversationSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@map("conversation_turns")
+}
+
+// ============================================================================
+// infrastructure
+// ============================================================================
+
+/// Transactional outbox (ADR-002). Written in the same transaction as the state
+/// change it describes, then relayed at-least-once. Consumers must be idempotent.
+model OutboxEvent {
+  id            String   @id
+  type          String
+  aggregateType String
+  aggregateId   String
+  userId        String
+  payload       Json
+  schemaVersion Int      @default(1)
+  occurredAt    DateTime @default(now())
+
+  publishedAt DateTime?
+  attempts    Int       @default(0)
+  lastError   String?
+
+  @@index([publishedAt, occurredAt])
+  @@index([aggregateType, aggregateId])
+  @@map("outbox_events")
+}

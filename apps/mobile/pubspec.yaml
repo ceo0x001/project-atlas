@@ -1,0 +1,24 @@
+name: atlas
+description: 'Atlas — AI Financial Operating System. Android-first client.'
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.6.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+# The full dependency set (drift for the local read model, riverpod, dio, the SMS
+# platform channel) lands in M1, resolved against a real Flutter install rather
+# than guessed at. See apps/mobile/README.md.
+
+flutter:
+  uses-material-design: true
