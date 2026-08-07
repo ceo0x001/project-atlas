@@ -27,6 +27,21 @@ export const EVIDENCE_SAMPLE_SIZE = 10;
  */
 const SETTLED_STATUS = 'POSTED';
 
+/**
+ * Excludes transactions absorbed by another during reconciliation (ADR-008).
+ *
+ * This is the most dangerous predicate in the codebase. A merge does not delete the
+ * absorbed transaction — the row survives so that insights, memories and past
+ * explanations citing its id still resolve — which means any query that omits this
+ * condition counts the same money twice and **silently overstates every total**.
+ *
+ * It therefore lives in the mandatory predicate set rather than in a convention, and
+ * `aggregate-compiler.supersession.test.ts` enumerates every query this module can emit
+ * and asserts each one carries it. A future query that forgets fails the build instead of
+ * lying about someone's spending.
+ */
+const NOT_SUPERSEDED = 't."supersededByTransactionId" IS NULL';
+
 export interface CompiledQuery {
   readonly sql: string;
   readonly params: readonly unknown[];
@@ -114,6 +129,7 @@ function buildPredicates(plan: LedgerQueryPlan, parameters: ParameterList): stri
   const predicates: string[] = [
     `t."userId" = ${parameters.bind(plan.userId)}`,
     `t.status = ${parameters.bind(SETTLED_STATUS)}::"TransactionStatus"`,
+    NOT_SUPERSEDED,
     `t.currency = ${parameters.bind(filter.currency)}`,
     `t."occurredAt" >= ${parameters.bind(filter.occurredFrom)}`,
     `t."occurredAt" <= ${parameters.bind(filter.occurredTo)}`,

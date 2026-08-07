@@ -49,20 +49,23 @@ model User {
   updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
   deactivatedAt   DateTime? @db.Timestamptz(3)
 
-  accounts            Account[]
-  devices             Device[]
-  consents            Consent[]
-  transactions        Transaction[]
-  observations        TransactionObservation[]
-  categories          Category[]
-  merchants           Merchant[]
-  parseFailures       ParseFailure[]
-  statementImports    StatementImport[]
-  insights            Insight[]
-  recurringSeries     RecurringSeries[]
-  facts               Fact[]
-  episodes            Episode[]
-  conversations       ConversationSession[]
+  accounts             Account[]
+  devices              Device[]
+  consents             Consent[]
+  transactions         Transaction[]
+  observations         TransactionObservation[]
+  categories           Category[]
+  merchants            Merchant[]
+  parseFailures        ParseFailure[]
+  statementImports     StatementImport[]
+  insights             Insight[]
+  recurringSeries      RecurringSeries[]
+  facts                Fact[]
+  episodes             Episode[]
+  conversations        ConversationSession[]
+  reconciliationEvents ReconciliationEvent[]
+  suspectedDuplicates  SuspectedDuplicate[]
+  suspectedGaps        SuspectedGap[]
 
   @@map("users")
 }
@@ -89,9 +92,9 @@ model Device {
   osVersion  String?
   appVersion String?
   pushToken  String?
-  lastSeenAt DateTime? @db.Timestamptz(3)
+  lastSeenAt DateTime?      @db.Timestamptz(3)
   createdAt  DateTime       @default(now()) @db.Timestamptz(3)
-  revokedAt  DateTime? @db.Timestamptz(3)
+  revokedAt  DateTime?      @db.Timestamptz(3)
 
   user         User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
   observations TransactionObservation[]
@@ -142,7 +145,7 @@ model Consent {
   scope         ConsentScope
   policyVersion String
   grantedAt     DateTime     @default(now()) @db.Timestamptz(3)
-  revokedAt     DateTime? @db.Timestamptz(3)
+  revokedAt     DateTime?    @db.Timestamptz(3)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -191,8 +194,8 @@ model Account {
 
   /// Encrypted at the field level; only the last four digits are stored in clear
   /// so the UI can disambiguate accounts without holding the full number.
-  accountNumberEnc    Bytes?
-  accountNumberLast4  String?
+  accountNumberEnc   Bytes?
+  accountNumberLast4 String?
 
   /// Cached projection of the ledger, refreshed on write. Balances are always
   /// recomputable from transactions — this is an optimisation, not a source of truth.
@@ -203,11 +206,12 @@ model Account {
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @db.Timestamptz(3)
 
-  user         User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  institution  Institution?             @relation(fields: [institutionId], references: [id])
-  transactions Transaction[]
-  observations TransactionObservation[]
-  imports      StatementImport[]
+  user          User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  institution   Institution?             @relation(fields: [institutionId], references: [id])
+  transactions  Transaction[]
+  observations  TransactionObservation[]
+  imports       StatementImport[]
+  suspectedGaps SuspectedGap[]
 
   @@index([userId])
   @@map("accounts")
@@ -240,8 +244,8 @@ model Transaction {
   amountMinor BigInt
   currency    String
   direction   TransactionDirection
-  occurredAt  DateTime @db.Timestamptz(3)
-  bookedAt    DateTime? @db.Timestamptz(3)
+  occurredAt  DateTime             @db.Timestamptz(3)
+  bookedAt    DateTime?            @db.Timestamptz(3)
 
   description String
   narration   String?
@@ -262,6 +266,16 @@ model Transaction {
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @db.Timestamptz(3)
 
+  /// Set when this transaction was absorbed by another during reconciliation (ADR-008).
+  /// The row is never deleted: insights, memories and past explanations may already cite
+  /// this id, and deleting it would break the provenance chain that makes a number
+  /// explainable (invariant I6).
+  ///
+  /// EVERY aggregate MUST exclude rows where this is non-null, or totals double-count.
+  /// That exclusion lives in the ledger query compiler's mandatory predicate set rather
+  /// than in a convention, with a guard test enumerating every query it can emit.
+  supersededByTransactionId String?
+
   user            User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
   account         Account                  @relation(fields: [accountId], references: [id], onDelete: Cascade)
   merchant        Merchant?                @relation(fields: [merchantId], references: [id])
@@ -270,11 +284,129 @@ model Transaction {
   observations    TransactionObservation[]
   insightEvidence InsightEvidence[]
 
+  supersededBy Transaction?  @relation("Supersession", fields: [supersededByTransactionId], references: [id])
+  supersedes   Transaction[] @relation("Supersession")
+
   @@index([userId, occurredAt(sort: Desc)])
   @@index([userId, accountId, occurredAt(sort: Desc)])
   @@index([userId, categoryId, occurredAt(sort: Desc)])
   @@index([userId, merchantId, occurredAt(sort: Desc)])
+  /// Supports the mandatory supersession exclusion on every aggregate.
+  @@index([userId, supersededByTransactionId])
   @@map("transactions")
+}
+
+/// A reconciliation decision that was acted on, and the evidence that justified it.
+///
+/// Append-only. Exists because re-projecting a transaction can change a figure the user
+/// already saw (risk R14): without this, a changed total is inexplicable. It is the audit
+/// trail that makes a merge defensible after the fact, not optional bookkeeping.
+model ReconciliationEvent {
+  id     String @id
+  userId String
+
+  kind      ReconciliationKind
+  decidedBy ReconciliationActor
+
+  /// The transaction that remains authoritative.
+  survivingTransactionId String?
+  /// The transaction that was absorbed, for a MERGE, or created, for a SPLIT.
+  absorbedTransactionId  String?
+
+  /// Serialised MatchEvidence: reference equality, balance equality, seconds apart, and
+  /// how many look-alikes existed at the time. Stored so a decision can be reviewed with
+  /// the information that produced it rather than with today's data.
+  evidence Json
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("reconciliation_events")
+}
+
+/// Two transactions that may be the same money, awaiting the user's answer.
+///
+/// Not a transaction and not a decision — a question about two. Created when amount and
+/// timing agree but neither the bank's reference nor the reported balance corroborates,
+/// because silently merging on circumstantial evidence is what would make a CFO
+/// untrustworthy (ADR-008 §4).
+model SuspectedDuplicate {
+  id     String @id
+  userId String
+
+  /// Ordered by transaction id, not by arrival, so the same pair cannot be queued twice
+  /// from opposite directions. The unique constraint below depends on that ordering.
+  leftTransactionId  String
+  rightTransactionId String
+
+  evidence   Json
+  resolution SuspectedDuplicateResolution?
+  resolvedAt DateTime?                     @db.Timestamptz(3)
+  createdAt  DateTime                      @default(now()) @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, leftTransactionId, rightTransactionId])
+  @@index([userId, resolution])
+  @@map("suspected_duplicates")
+}
+
+/// Money that moved without a transaction to explain it, inferred from a balance
+/// discontinuity.
+///
+/// Deliberately never materialised as a transaction. The discrepancy gives an amount and a
+/// time range and nothing else — no merchant, no description — so creating one would put a
+/// figure in the ledger that no source ever reported. This is a question to ask, and it
+/// stays one.
+model SuspectedGap {
+  id        String @id
+  userId    String
+  accountId String
+  currency  String
+
+  /// Size of the unexplained movement. Always positive; `missingDirection` carries the sign.
+  amountMinor      BigInt
+  missingDirection TransactionDirection
+
+  /// The gap lies after this transaction and at or before the other.
+  afterTransactionId  String
+  beforeTransactionId String
+  afterAt             DateTime @db.Timestamptz(3)
+  beforeAt            DateTime @db.Timestamptz(3)
+
+  resolution SuspectedGapResolution?
+  resolvedAt DateTime?               @db.Timestamptz(3)
+  createdAt  DateTime                @default(now()) @db.Timestamptz(3)
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, accountId, afterTransactionId, beforeTransactionId])
+  @@index([userId, resolution])
+  @@map("suspected_gaps")
+}
+
+enum ReconciliationKind {
+  MERGE
+  SPLIT
+  GAP_FLAGGED
+}
+
+enum ReconciliationActor {
+  SYSTEM
+  USER
+}
+
+enum SuspectedDuplicateResolution {
+  MERGED
+  KEPT_SEPARATE
+}
+
+enum SuspectedGapResolution {
+  EXPLAINED
+  DISMISSED
 }
 
 enum ObservationSource {
@@ -302,7 +434,7 @@ model TransactionObservation {
   amountMinor BigInt
   currency    String
   direction   TransactionDirection
-  occurredAt  DateTime @db.Timestamptz(3)
+  occurredAt  DateTime             @db.Timestamptz(3)
 
   balanceAfterMinor BigInt?
   description       String?
@@ -318,13 +450,13 @@ model TransactionObservation {
   observedAt DateTime @db.Timestamptz(3)
   createdAt  DateTime @default(now()) @db.Timestamptz(3)
 
-  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  transaction  Transaction?     @relation(fields: [transactionId], references: [id])
-  account      Account?         @relation(fields: [accountId], references: [id])
-  institution  Institution?     @relation(fields: [institutionId], references: [id])
-  device       Device?          @relation(fields: [deviceId], references: [id])
-  template     ParseTemplate?   @relation(fields: [parsedByTemplateId], references: [id])
-  import       StatementImport? @relation(fields: [statementImportId], references: [id])
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction Transaction?     @relation(fields: [transactionId], references: [id])
+  account     Account?         @relation(fields: [accountId], references: [id])
+  institution Institution?     @relation(fields: [institutionId], references: [id])
+  device      Device?          @relation(fields: [deviceId], references: [id])
+  template    ParseTemplate?   @relation(fields: [parsedByTemplateId], references: [id])
+  import      StatementImport? @relation(fields: [statementImportId], references: [id])
 
   @@unique([userId, dedupeKey])
   @@index([userId, accountId, occurredAt])
@@ -345,9 +477,9 @@ model Category {
 
   createdAt DateTime @default(now()) @db.Timestamptz(3)
 
-  user         User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  parent       Category?        @relation("CategoryHierarchy", fields: [parentId], references: [id])
-  children     Category[]       @relation("CategoryHierarchy")
+  user         User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent       Category?         @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children     Category[]        @relation("CategoryHierarchy")
   transactions Transaction[]
   merchants    Merchant[]
   series       RecurringSeries[]
@@ -426,11 +558,11 @@ model ParseTemplate {
   fieldMap     Json
   fixtures     Json
 
-  status    TemplateStatus @default(DRAFT)
-  author    TemplateAuthor @default(SYSTEM)
-  createdAt DateTime       @default(now()) @db.Timestamptz(3)
-  publishedAt DateTime? @db.Timestamptz(3)
-  retiredAt   DateTime? @db.Timestamptz(3)
+  status      TemplateStatus @default(DRAFT)
+  author      TemplateAuthor @default(SYSTEM)
+  createdAt   DateTime       @default(now()) @db.Timestamptz(3)
+  publishedAt DateTime?      @db.Timestamptz(3)
+  retiredAt   DateTime?      @db.Timestamptz(3)
 
   institution      Institution              @relation(fields: [institutionId], references: [id], onDelete: Cascade)
   observations     TransactionObservation[]
@@ -551,7 +683,7 @@ model Insight {
 
   status      InsightStatus @default(NEW)
   generatedAt DateTime      @default(now()) @db.Timestamptz(3)
-  expiresAt   DateTime? @db.Timestamptz(3)
+  expiresAt   DateTime?     @db.Timestamptz(3)
 
   /// Stable key so a re-run of the same detection does not produce duplicates.
   dedupeKey String
@@ -606,7 +738,7 @@ model RecurringSeries {
   expectedAmountMinor BigInt
   currency            String
 
-  lastSeenAt     DateTime @db.Timestamptz(3)
+  lastSeenAt     DateTime  @db.Timestamptz(3)
   nextExpectedAt DateTime? @db.Timestamptz(3)
   confidence     Float
   isActive       Boolean   @default(true)
@@ -647,13 +779,13 @@ model Fact {
   source     FactSource
   provenance Json?
 
-  effectiveFrom DateTime  @default(now()) @db.Timestamptz(3)
-  effectiveTo   DateTime? @db.Timestamptz(3)
-  supersededById String?  @unique
+  effectiveFrom  DateTime  @default(now()) @db.Timestamptz(3)
+  effectiveTo    DateTime? @db.Timestamptz(3)
+  supersededById String?   @unique
 
   createdAt DateTime @default(now()) @db.Timestamptz(3)
 
-  user        User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   supersededBy Fact? @relation("FactVersions", fields: [supersededById], references: [id])
   supersedes   Fact? @relation("FactVersions")
 
@@ -666,12 +798,12 @@ model Fact {
 /// similarity search runs through $queryRaw. The HNSW index lives in the RLS/index
 /// migration alongside the other raw SQL.
 model Episode {
-  id        String   @id
-  userId    String
-  sessionId String?
-  summary   String
+  id         String   @id
+  userId     String
+  sessionId  String?
+  summary    String
   occurredAt DateTime @db.Timestamptz(3)
-  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
 
   embedding Unsupported("vector(1024)")?
 
@@ -697,7 +829,7 @@ model ConversationSession {
   deviceId  String?
   channel   ConversationChannel
   startedAt DateTime            @default(now()) @db.Timestamptz(3)
-  endedAt   DateTime? @db.Timestamptz(3)
+  endedAt   DateTime?           @db.Timestamptz(3)
 
   user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   turns    ConversationTurn[]
@@ -737,17 +869,17 @@ model ConversationTurn {
 
   groundingStatus GroundingStatus @default(NOT_APPLICABLE)
 
-  model              String?
-  timeToFirstTokenMs Int?
-  latencyMs          Int?
-  inputTokens        Int?
-  outputTokens       Int?
+  model                    String?
+  timeToFirstTokenMs       Int?
+  latencyMs                Int?
+  inputTokens              Int?
+  outputTokens             Int?
   /// Cache tokens are billed at different rates (writes 1.25x, reads 0.1x), so cost
   /// cannot be computed without them — and cache read rate is itself a tracked metric.
   cacheCreationInputTokens Int?
   cacheReadInputTokens     Int?
   /// Cost in millionths of a USD — integer, for the same reason money is (ADR-003).
-  costMicroUsd       Int?
+  costMicroUsd             Int?
 
   createdAt DateTime @default(now()) @db.Timestamptz(3)
 
