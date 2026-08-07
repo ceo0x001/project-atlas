@@ -31,8 +31,14 @@ const baseSchema = z.object({
   TEMPORAL_TASK_QUEUE: z.string().default('atlas-core'),
 
   ANTHROPIC_API_KEY: z.string().optional(),
-  ANTHROPIC_MODEL_CONVERSATION: z.string().default('claude-fable-5'),
-  ANTHROPIC_MODEL_BACKGROUND: z.string().default('claude-haiku-4-5-20251001'),
+  ANTHROPIC_MODEL_CONVERSATION: z.string().default('claude-opus-5'),
+  ANTHROPIC_MODEL_BACKGROUND: z.string().default('claude-haiku-4-5'),
+  /**
+   * Reasoning effort for conversation turns. Kept in configuration rather than in
+   * code because it is the primary latency/cost lever and wants sweeping against
+   * real questions, not a value baked into a build.
+   */
+  ANTHROPIC_EFFORT: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'),
 
   VOYAGE_API_KEY: z.string().optional(),
   EMBEDDING_MODEL: z.string().default('voyage-3'),

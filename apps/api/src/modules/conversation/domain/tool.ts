@@ -1,4 +1,4 @@
-import type { Result, SessionId, TurnId, UserId } from '@atlas/shared-kernel';
+import type { CurrencyCode, Result, SessionId, TurnId, UserId } from '@atlas/shared-kernel';
 
 /**
  * The tool registry — the model's only route to data (ADR-005).
@@ -24,6 +24,15 @@ export interface ToolContext {
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
   readonly requestedAt: Date;
+  /**
+   * The user's IANA timezone and primary currency, resolved from their profile.
+   *
+   * Passed in context rather than accepted as tool input on purpose: they are facts
+   * about the user, not choices for the model to make. A model that could name a
+   * timezone could name the wrong one, and every period boundary would shift.
+   */
+  readonly timeZone: string;
+  readonly currency: CurrencyCode;
 }
 
 export type GroundingFactKind = 'money' | 'count' | 'percentage' | 'date';

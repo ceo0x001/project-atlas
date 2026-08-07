@@ -16,7 +16,7 @@ import type {
   LedgerQueryResult,
 } from '../domain/ledger-query';
 import { validateQueryPlan } from '../domain/ledger-query.validator';
-import type { LedgerQueryPort } from '../domain/ledger-query.port';
+import type { CategoryRef, LedgerQueryPort, MerchantRef } from '../domain/ledger-query.port';
 import type {
   AccountBalance,
   TransactionDirection,
@@ -170,6 +170,46 @@ export class PrismaLedgerQueryRepository implements LedgerQueryPort {
         row.balanceAfterMinor === null ? null : Money.of(BigInt(row.balanceAfterMinor), currency),
       status: row.status as TransactionStatus,
     }));
+  }
+
+  /**
+   * Case-insensitive match on slug or name. System categories (null userId) are
+   * visible alongside the user's own, per the RLS policy on `categories`.
+   */
+  async findCategory(userId: UserId, term: string): Promise<CategoryRef | null> {
+    const normalised = term.trim().toLowerCase();
+    if (normalised === '') return null;
+
+    const rows = await this.tenantScope.run(userId, (tx) =>
+      tx.category.findMany({
+        where: {
+          OR: [{ slug: normalised }, { name: { equals: term.trim(), mode: 'insensitive' } }],
+        },
+        select: { id: true, slug: true, name: true },
+        take: 1,
+      }),
+    );
+
+    const row = rows[0];
+
+    return row ? { id: row.id as CategoryId, slug: row.slug, name: row.name } : null;
+  }
+
+  async findMerchant(userId: UserId, term: string): Promise<MerchantRef | null> {
+    const normalised = term.trim();
+    if (normalised === '') return null;
+
+    const rows = await this.tenantScope.run(userId, (tx) =>
+      tx.merchant.findMany({
+        where: { displayName: { contains: normalised, mode: 'insensitive' } },
+        select: { id: true, displayName: true },
+        take: 1,
+      }),
+    );
+
+    const row = rows[0];
+
+    return row ? { id: row.id as MerchantId, displayName: row.displayName } : null;
   }
 
   async getBalances(userId: UserId): Promise<readonly AccountBalance[]> {

@@ -1,4 +1,10 @@
-## What runs today (M1 complete end to end)
+## What runs today (M1 data pipeline complete; conversation layer outstanding)
+
+M1 is **not** finished. Its definition (ARCHITECTURE §14) is "the moment Atlas answers
+'how much did I spend on food this month?' truthfully from real SMS-parsed data" — a
+question asked in words. What works today is the pipeline underneath that: a developer
+calls a repository method and gets a correct number. The conversation loop, the tool
+registry and the grounding gate are the remaining work.
 
 | Piece                    | State                                                                                        |
 | ------------------------ | -------------------------------------------------------------------------------------------- |
