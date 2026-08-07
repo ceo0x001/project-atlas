@@ -26,10 +26,13 @@ const MODULE_DEPENDENCIES = {
   // authenticated-request type, never on identity's internals.
   ledger: ['identity'],
   ingestion: ['identity'],
+  // `intelligence` joined when recurring detection gained an HTTP surface. Same rationale
+  // again — three modules now, all for the same reason, which is what makes it a pattern
+  // rather than a series of exceptions.
+  intelligence: ['identity', 'ledger'],
   memory: [],
   voice: [],
   notifications: [],
-  intelligence: ['ledger'],
   conversation: ['identity', 'ledger', 'memory', 'intelligence'],
 };
 

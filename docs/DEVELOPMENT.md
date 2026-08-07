@@ -33,7 +33,7 @@ reason `DeviceEnrolmentService` has never had a controller.
 | Piece                    | State                                                                                                   |
 | ------------------------ | ------------------------------------------------------------------------------------------------------- |
 | `packages/shared-kernel` | Builds, 66 tests, lint clean                                                                            |
-| `apps/api`               | Builds, boots, 517 unit tests + 154 integration, lint clean                                             |
+| `apps/api`               | Builds, boots, 552 unit tests + 166 integration, lint clean                                             |
 | SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                           |
 | Ledger                   | Read path, admission, balance anchoring; RLS enforced and proven                                        |
 | Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                                     |
@@ -78,6 +78,63 @@ CI with an error that looks like a code defect, and the instinct will be to debu
 code rather than the workflow. Either drop the variable until something needs it, or add
 the service container in the same commit as the code that dials it, where the reason is
 self-evident.
+
+## Recurring money — bills, income and habits
+
+`GET /v1/recurring` lists what has a rhythm. `GET /v1/recurring/upcoming` answers the question that
+matters: what is due, what is coming in, and whether the balance covers the gap.
+
+**No model is involved.** A rhythm in a list of dates is arithmetic, so this is a pure function over
+the ledger — repeatable, checkable by hand, and something Atlas can assert rather than suggest.
+
+### Three kinds of recurring money, and why the distinction earns its keep
+
+A bill and a habit are both regular. DSTV at ₦24,500 on the 3rd is an obligation, and a missed one is
+worth saying. Fuel most Fridays is a rhythm, and _"you missed your Friday fuel"_ is noise — the kind
+of notification that gets an assistant muted.
+
+The difference is not the regularity of the dates, which is identical. It is the **stability of the
+amount**: bills are the same figure, habits vary. Habits are therefore excluded from the commitment
+arithmetic entirely, because counting a choice as an obligation overstates what is unavoidable.
+
+### One number was answering two questions
+
+Confidence originally multiplied in amount stability. A flawlessly weekly fuel habit whose amounts
+varied two-fold scored 0.32 and was discarded — despite a perfect rhythm. The score was being asked
+both _"is this real?"_ and _"is the amount predictable?"_.
+
+They are now separate: **confidence measures rhythm; stability decides kind.** A bill needs both; a
+habit needs only the first, because varying is what makes it a habit.
+
+### The reported amount always actually occurred
+
+The expected figure is the **median of observed amounts**, never a mean. An average would invent a
+number no payment ever had, and this figure gets read aloud as an expectation.
+
+### Nothing derived is trusted after the fact
+
+Every field a series reports goes stale the moment a transaction lands, so detection re-runs over the
+whole history and overwrites them. The row exists to give a series a stable identity — and to hold the
+one thing detection must never overwrite: **the user's dismissal**, in its own column. Sharing
+`isActive` with detection would let the next run resurrect something the user had already rejected,
+and being asked twice about the same wrong guess is how trust is lost.
+
+### The defect a live run found
+
+Obligations were filtered on `nextExpectedAt >= now`, so a bill **four days overdue vanished
+entirely** — and the projection cheerfully reported "not short" while ignoring ₦24,500 that still had
+to go out. An overdue bill is the single most useful thing this can report.
+
+Overdue obligations are now included and counted. Bounded by **one full cycle**: later than its own
+interval means a subscription probably stopped rather than being late, which stops a cancelled bill
+being reported as overdue for ever.
+
+### Deliberately not attempted
+
+A payee whose history holds two rhythms — a big monthly shop and small daily items at the same
+supermarket — is reported as nothing. Splitting it needs clustering, and a wrong clustering heuristic
+produces a confident bill that does not exist. Narrations are also normalised hard enough to
+over-group unrelated card purchases; the arithmetic rejects those, not the string match.
 
 ## Statement import
 

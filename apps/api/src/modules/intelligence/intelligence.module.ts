@@ -1,13 +1,23 @@
 import { Module } from '@nestjs/common';
+import { IdentityModule } from '@modules/identity';
+import { RecurringController } from './api/recurring.controller';
+import { RecurringDetectionService } from './application/recurring-detection.service';
 
 /**
- * Intelligence — categorisation, recurring-payment detection, anomalies, insights.
+ * Intelligence — patterns over the ledger, and the insights drawn from them.
  *
- * Reads the ledger, never mutates it. Every insight it produces must carry
- * evidence linking back to the transactions that justify it (invariant I6);
- * an insight that cannot explain itself is a bug, not a feature.
+ * The rule this module exists to hold: **nothing here is inferred by a language model.** A rhythm
+ * in a list of dates is arithmetic, and keeping it that way is what makes a bill something Atlas can
+ * assert rather than merely suggest. The model's role comes later, choosing which of these facts is
+ * worth mentioning and how to phrase it — never computing one.
  *
- * Implementations land in M4.
+ * Depends on `identity` for the auth guard, which is the same cross-cutting exemption every module
+ * with an HTTP surface uses.
  */
-@Module({})
+@Module({
+  imports: [IdentityModule],
+  controllers: [RecurringController],
+  providers: [RecurringDetectionService],
+  exports: [RecurringDetectionService],
+})
 export class IntelligenceModule {}

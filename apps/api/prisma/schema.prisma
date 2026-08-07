@@ -779,6 +779,12 @@ model InsightEvidence {
   @@map("insight_evidence")
 }
 
+enum SeriesKind {
+  BILL
+  INCOME
+  HABIT
+}
+
 enum RecurrenceCadence {
   WEEKLY
   BIWEEKLY
@@ -806,6 +812,27 @@ model RecurringSeries {
   confidence     Float
   isActive       Boolean   @default(true)
 
+  /// What sort of recurring money this is. A missed BILL is worth mentioning; a missed HABIT is
+  /// noise, and telling someone they skipped their Friday fuel is how an assistant gets muted.
+  kind SeriesKind @default(BILL)
+
+  /// Whether money is going out or coming in. Stored rather than derived because "what is due
+  /// before payday" needs to separate the two without re-reading every transaction.
+  direction TransactionDirection @default(DEBIT)
+
+  /// How many occurrences the detection saw. Recorded so a confidence score can be explained
+  /// rather than merely asserted.
+  occurrences Int @default(0)
+
+  /// Stable identity for a payee-and-shape, so re-running detection updates a series instead of
+  /// creating a second one beside it.
+  detectionKey String
+
+  /// Set when the user says this is not a real series. Kept separate from `isActive`, which
+  /// detection owns: without the separation, the next detection run would cheerfully resurrect
+  /// something the user had already dismissed.
+  dismissedAt DateTime? @db.Timestamptz(3)
+
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @db.Timestamptz(3)
 
@@ -814,6 +841,7 @@ model RecurringSeries {
   category     Category?     @relation(fields: [categoryId], references: [id])
   transactions Transaction[]
 
+  @@unique([userId, detectionKey])
   @@index([userId, nextExpectedAt])
   @@map("recurring_series")
 }
