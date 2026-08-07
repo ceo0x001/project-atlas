@@ -22,12 +22,12 @@ import { TenantScope } from '../src/shared/prisma/tenant-scope';
  * Requires `pnpm infra:up` and an applied migration.
  */
 
-const userOne = idFromSeed<'UserId'>(7_000) as UserId;
-const userTwo = idFromSeed<'UserId'>(7_500) as UserId;
-const accountOne = idFromSeed<'AccountId'>(7_100);
+const userOne = idFromSeed<'UserId'>(9_000) as UserId;
+const userTwo = idFromSeed<'UserId'>(9_500) as UserId;
+const accountOne = idFromSeed<'AccountId'>(9_100);
 
-const survivor = idFromSeed<'TransactionId'>(7_200);
-const absorbed = idFromSeed<'TransactionId'>(7_300);
+const survivor = idFromSeed<'TransactionId'>(9_200);
+const absorbed = idFromSeed<'TransactionId'>(9_300);
 
 const env = parseEnv();
 
@@ -76,8 +76,8 @@ beforeAll(async () => {
 
   await owner.user.createMany({
     data: [
-      { id: userOne, phoneE164: '+2348000007000', timezone: 'Africa/Lagos' },
-      { id: userTwo, phoneE164: '+2348000007500', timezone: 'Africa/Lagos' },
+      { id: userOne, phoneE164: '+2348000009000', timezone: 'Africa/Lagos' },
+      { id: userTwo, phoneE164: '+2348000009500', timezone: 'Africa/Lagos' },
     ],
   });
 
@@ -175,7 +175,7 @@ describe('reconciliation tables are under row-level security', () => {
     await owner.reconciliationEvent.createMany({
       data: [
         {
-          id: idFromSeed<'EventId'>(7_600),
+          id: idFromSeed<'EventId'>(9_600),
           userId: userOne,
           kind: 'MERGE',
           decidedBy: 'SYSTEM',
@@ -184,7 +184,7 @@ describe('reconciliation tables are under row-level security', () => {
           evidence: { referenceEqual: false, balanceEqual: true, secondsApart: 0 },
         },
         {
-          id: idFromSeed<'EventId'>(7_700),
+          id: idFromSeed<'EventId'>(9_700),
           userId: userTwo,
           kind: 'MERGE',
           decidedBy: 'SYSTEM',
@@ -206,7 +206,7 @@ describe('reconciliation tables are under row-level security', () => {
       tenantScope.run(userOne, (tx) =>
         tx.reconciliationEvent.create({
           data: {
-            id: idFromSeed<'EventId'>(7_800),
+            id: idFromSeed<'EventId'>(9_800),
             userId: userTwo,
             kind: 'MERGE',
             decidedBy: 'SYSTEM',
@@ -220,7 +220,7 @@ describe('reconciliation tables are under row-level security', () => {
   it('hides another tenant’s suspected gaps', async () => {
     await owner.suspectedGap.create({
       data: {
-        id: idFromSeed<'InsightId'>(7_900),
+        id: idFromSeed<'InsightId'>(9_900),
         userId: userTwo,
         accountId: accountOne,
         currency: 'NGN',

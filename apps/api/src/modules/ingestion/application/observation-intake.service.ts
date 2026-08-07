@@ -111,6 +111,7 @@ export class ObservationIntakeService {
           balanceAfterMinor:
             input.balanceAfterMinor == null ? null : BigInt(input.balanceAfterMinor),
           description: input.description ?? null,
+          rawReference: input.rawReference ?? null,
           dedupeKey: input.dedupeKey,
           parsedByTemplateId: input.templateId ?? null,
         })),

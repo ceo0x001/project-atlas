@@ -2,24 +2,24 @@
 
 ## What runs today (M1 complete — Atlas answers questions)
 
-| Piece                    | State                                                                                          |
-| ------------------------ | ---------------------------------------------------------------------------------------------- |
-| `packages/shared-kernel` | Builds, 66 tests, lint clean                                                                   |
-| `apps/api`               | Builds, boots, 319 unit tests, lint clean                                                      |
-| SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                  |
-| Ledger                   | Read path, admission, balance anchoring; RLS enforced and proven                               |
-| Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                            |
-| Grounding gate           | Complete — significant-figure rounding rule, 35 tests                                          |
-| Period resolution        | Complete — named periods resolved server-side, DST-correct, 41 tests                           |
-| `query_ledger` tool      | Complete — no model-authored ids, no model date arithmetic, unresolved filters return nothing  |
-| Agent loop               | Complete — tool loop, grounding escalation, turn persistence, 19 integration tests             |
-| `POST /v1/chat`          | Complete, device-authenticated                                                                 |
-| **Live, end to end**     | **Working on two-tier routing** — Haiku 4.5 answers, Opus 5 on escalation                      |
-| Reconciliation           | Not started (M2)                                                                               |
-| Durable outbox relay     | Not started (M2, Temporal)                                                                     |
-| User authentication      | Not started — no HTTP device-enrolment route yet, deliberately                                 |
-| `apps/mobile`            | `flutter analyze` + `flutter test` **green in CI**; never compiled locally (no SDK)            |
-| CI                       | **Green on first run** — Backend 1.5 min, Mobile 2 min ([ci.yml](../.github/workflows/ci.yml)) |
+| Piece                    | State                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `packages/shared-kernel` | Builds, 66 tests, lint clean                                                                            |
+| `apps/api`               | Builds, boots, 410 unit tests + 78 integration, lint clean                                              |
+| SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                           |
+| Ledger                   | Read path, admission, balance anchoring; RLS enforced and proven                                        |
+| Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                                     |
+| Grounding gate           | Complete — significant-figure rounding rule, 35 tests                                                   |
+| Period resolution        | Complete — named periods resolved server-side, DST-correct, 41 tests                                    |
+| `query_ledger` tool      | Complete — no model-authored ids, no model date arithmetic, unresolved filters return nothing           |
+| Agent loop               | Complete — tool loop, grounding escalation, turn persistence, 19 integration tests                      |
+| `POST /v1/chat`          | Complete, device-authenticated                                                                          |
+| **Live, end to end**     | **Working on two-tier routing** — Haiku 4.5 answers, Opus 5 on escalation                               |
+| Reconciliation           | **Working** — projection, matching, supersession; two sources collapse to one transaction               |
+| Durable outbox relay     | Not started (M2, Temporal)                                                                              |
+| User authentication      | Not started — no HTTP device-enrolment route yet, deliberately                                          |
+| `apps/mobile`            | `flutter analyze` + `flutter test` **green in CI**; never compiled locally (no SDK)                     |
+| CI                       | **Green** since the first run — Backend ~1.5 min, Mobile ~2 min ([ci.yml](../.github/workflows/ci.yml)) |
 
 ### Talking to Atlas from the terminal
 
@@ -50,6 +50,70 @@ CI with an error that looks like a code defect, and the instinct will be to debu
 code rather than the workflow. Either drop the variable until something needs it, or add
 the service container in the same commit as the code that dials it, where the reason is
 self-evident.
+
+## Reconciliation (M2)
+
+The design is [ADR-008](adr/008-transactions-as-observation-projections.md) and
+[docs/design/m2-reconciliation.md](design/m2-reconciliation.md). What is running:
+
+A canonical transaction's fields are a pure function of its linked observations. Merging is
+"union the observation sets and re-project", splitting is the exact inverse, a user
+correction is just another observation ranked highest, and provenance is automatic. One
+mechanism where the obvious design needs four.
+
+Matching is deliberately biased toward **under-merging**. An under-merge leaves a visible
+duplicate the user can fix; an over-merge silently removes real spending from their totals
+with no way to notice. So amounts must match exactly, a reference or balance mismatch
+vetoes outright, and more than one candidate refuses to merge at all. Only reference or
+balance corroboration earns an automatic merge — weaker evidence becomes a queued question.
+
+### Two things here can make Atlas lie about money
+
+**R10 — a query path that forgets the supersession filter doubles every total.** Absorbed
+transactions are superseded, not deleted, so their rows are still there. The exclusion is
+in the query compiler's mandatory predicate set, held by 48 unit guard tests enumerating
+the compiler's whole input space _and_ an integration test that proves it in SQL — because
+a predicate can be present and still not work (`= NULL` matches nothing). The integration
+test asserts the pre-merge state first: two rows for one ₦5,000 purchase read ₦10,000.
+
+**R9 — an over-merge is invisible.** Covered by the veto matrix in
+`match-decision.test.ts` and by the F2 integration test: two genuine ₦100 top-ups on one
+day must stay two transactions. Any matcher can pass the collapse test; passing both is the
+requirement.
+
+### Deliberate choices worth not undoing
+
+- **`occurredAt` prefers SMS over statement**, inverting the precedence used for amount.
+  Alerts are stamped when the money moved; statement rows are often date-only or carry a
+  booking date days later. Prefer the statement and a 31 August purchase lands in
+  September, corrupting every month-boundary total.
+- **Reference normalisation stops at case and whitespace.** Looser normalisation produces
+  false reference _equality_, which auto-merges — the invisible failure. Strictness only
+  ever costs a visible duplicate.
+- **A balance gap is a question, never a transaction.** The discrepancy gives an amount and
+  a time range and nothing else, so materialising one would put a figure in the ledger that
+  no source reported.
+- **An unresolved suspected duplicate leaves the money counted twice**, on purpose. Visible
+  and correctable beats silently hidden.
+
+### No Temporal needed for this
+
+The reactive path runs inside the admission transaction that already exists, the
+late-arrival path is triggered by an import completing rather than a clock, and gap
+detection is a pure function over balance readings the ledger already holds. Temporal stays
+scoped to the outbox relay and statement parsing, where durability across process death
+genuinely matters.
+
+### Known gap
+
+`rawReference` is plumbed end to end — wire contract, storage, matching — but **no parse
+template extracts one yet**, so reference-based auto-merge is dormant and matching relies
+on balance corroboration. Nigerian alerts almost always report a balance, so this works
+today; extracting references is a template-DSL change that would make it stronger.
+
+Reconciliation lives in `modules/ledger`, not a module of its own: it decides what a
+canonical transaction _is_, which is the ledger's own invariant. A separate module would
+need write access to these tables — the coupling the boundary rules exist to prevent.
 
 ## Measured on real data — model routing
 

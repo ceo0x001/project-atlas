@@ -1,8 +1,16 @@
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
-import { type AccountId, newId, type TransactionId } from '@atlas/shared-kernel';
+import {
+  type AccountId,
+  isCurrencyCode,
+  newId,
+  type ObservationId,
+  type TransactionId,
+} from '@atlas/shared-kernel';
 import { TRANSACTION_OBSERVED, type TransactionObservedEvent } from '@shared/events/contracts';
 import { DomainEventBus, type DomainEventHandler } from '@shared/events/domain-event-bus';
 import { TenantScope, type TenantClient } from '@shared/prisma/tenant-scope';
+import type { ObservationFacts } from '../domain/reconciliation/observation-facts';
+import { ReconciliationService } from './reconciliation.service';
 
 /**
  * Admits observations into the books.
@@ -10,12 +18,15 @@ import { TenantScope, type TenantClient } from '@shared/prisma/tenant-scope';
  * This is the only place a canonical transaction is created. Ingestion records what a
  * source claimed; the ledger decides what is true.
  *
- * **M1 scope: one observation becomes one transaction.** SMS is the only live source,
- * so there is nothing to reconcile against yet. Multi-source matching — the same
- * purchase seen as an SMS alert and again as a statement row, collapsed into one
- * transaction using the reported balance as an anchor — is M2 (ARCHITECTURE §5.1).
- * The observation/transaction split already exists precisely so that arrives without
- * reshaping anything.
+ * Admission stays **eager** — an observation becomes a transaction within seconds,
+ * because the product promise is that Atlas knows about a purchase almost as it happens.
+ * Holding observations until a matching window closes would buy easier matching and cost
+ * the thing that makes the product feel alive (ADR-008).
+ *
+ * The consequence is that reconciliation cannot be a gate in front of admission. By the
+ * time a statement row arrives describing a purchase already known from SMS, the
+ * transaction exists — so each observation asks `decideMatch` whether it belongs to
+ * something already booked, and only creates when the answer is no.
  */
 @Injectable()
 export class TransactionAdmissionService
@@ -28,6 +39,7 @@ export class TransactionAdmissionService
   constructor(
     private readonly tenantScope: TenantScope,
     private readonly eventBus: DomainEventBus,
+    private readonly reconciliation: ReconciliationService,
   ) {}
 
   onModuleInit(): void {
@@ -38,12 +50,24 @@ export class TransactionAdmissionService
     const { payload } = event;
 
     await this.tenantScope.run(event.userId, async (tx) => {
-      const observation = await tx.transactionObservation.findUnique({
+      const stored = await tx.transactionObservation.findUnique({
         where: { id: payload.observationId },
-        select: { transactionId: true },
+        select: {
+          id: true,
+          source: true,
+          amountMinor: true,
+          currency: true,
+          direction: true,
+          occurredAt: true,
+          balanceAfterMinor: true,
+          description: true,
+          rawReference: true,
+          observedAt: true,
+          transactionId: true,
+        },
       });
 
-      if (!observation) {
+      if (!stored) {
         // The event is durable but its subject is gone — a genuine inconsistency,
         // not a retryable blip, so it is worth shouting about.
         throw new Error(`Observation ${payload.observationId} not found`);
@@ -51,43 +75,114 @@ export class TransactionAdmissionService
 
       // Idempotency. Delivery is at-least-once, so a redelivered event must be a
       // no-op rather than a second transaction for the same money.
-      if (observation.transactionId !== null) return;
+      if (stored.transactionId !== null) return;
 
-      const transactionId = newId<'TransactionId'>();
-      const occurredAt = new Date(payload.occurredAt);
-      const balanceAfter =
-        payload.balanceAfterMinor === null ? null : BigInt(payload.balanceAfterMinor);
-
-      await tx.transaction.create({
-        data: {
-          id: transactionId,
-          userId: event.userId,
-          accountId: payload.accountId,
-          amountMinor: BigInt(payload.amountMinor),
-          currency: payload.currency,
-          direction: payload.direction,
-          occurredAt,
-          description: payload.description ?? 'Unlabelled transaction',
-          balanceAfterMinor: balanceAfter,
-          status: 'POSTED',
-        },
-      });
-
-      // The link is what makes the number explainable (invariant I6): every
-      // transaction can name the observations it was assembled from.
-      await tx.transactionObservation.update({
-        where: { id: payload.observationId },
-        data: { transactionId },
-      });
-
-      if (balanceAfter !== null) {
-        await this.applyBalanceAnchor(tx, payload.accountId, balanceAfter, occurredAt);
+      if (!isCurrencyCode(stored.currency)) {
+        throw new Error(`Observation ${stored.id} has unknown currency '${stored.currency}'`);
       }
 
-      this.logger.debug(`Admitted observation ${payload.observationId} as ${transactionId}`);
+      // Facts are read from the row rather than the event payload. The database is the
+      // source of truth; the payload is a lossy projection of it that predates
+      // reconciliation and carries no reference.
+      const facts: ObservationFacts = {
+        id: stored.id as ObservationId,
+        source: stored.source,
+        amountMinor: stored.amountMinor,
+        currency: stored.currency,
+        direction: stored.direction,
+        occurredAt: stored.occurredAt,
+        balanceAfterMinor: stored.balanceAfterMinor,
+        description: stored.description,
+        rawReference: stored.rawReference,
+        observedAt: stored.observedAt,
+      };
 
-      return transactionId as TransactionId;
+      const decision = await this.reconciliation.decide(tx, event.userId, facts, payload.accountId);
+
+      const transactionId =
+        decision.kind === 'merge'
+          ? await this.absorbInto(tx, event, facts, decision.into)
+          : await this.createTransaction(tx, event, facts, payload.accountId);
+
+      // A single look-alike on amount and timing alone is a question, not a decision.
+      // Asked rather than guessed, because silently reshaping someone's financial history
+      // on circumstantial evidence is what would make a CFO untrustworthy (ADR-008 §4).
+      if (decision.kind === 'ask') {
+        await this.reconciliation.queueSuspectedDuplicate(
+          tx,
+          event.userId,
+          transactionId,
+          decision.candidate,
+          decision.evidence,
+        );
+      }
+
+      if (facts.balanceAfterMinor !== null) {
+        await this.applyBalanceAnchor(
+          tx,
+          payload.accountId,
+          facts.balanceAfterMinor,
+          facts.occurredAt,
+        );
+      }
+
+      return transactionId;
     });
+  }
+
+  /**
+   * Attaches the observation to a transaction that already describes this money.
+   *
+   * No new transaction is created, and the survivor is re-projected from its whole
+   * observation set rather than patched — so the result depends on the evidence, not on
+   * which source happened to arrive first.
+   */
+  private async absorbInto(
+    tx: TenantClient,
+    event: TransactionObservedEvent,
+    facts: ObservationFacts,
+    into: TransactionId,
+  ): Promise<TransactionId> {
+    await this.reconciliation.attach(tx, event.userId, facts.id, into);
+
+    this.logger.debug(`Observation ${facts.id} reconciled into existing ${into}`);
+
+    return into;
+  }
+
+  private async createTransaction(
+    tx: TenantClient,
+    event: TransactionObservedEvent,
+    facts: ObservationFacts,
+    accountId: AccountId,
+  ): Promise<TransactionId> {
+    const transactionId = newId<'TransactionId'>();
+
+    await tx.transaction.create({
+      data: {
+        id: transactionId,
+        userId: event.userId,
+        accountId,
+        amountMinor: facts.amountMinor,
+        currency: facts.currency,
+        direction: facts.direction,
+        occurredAt: facts.occurredAt,
+        description: facts.description ?? 'Unlabelled transaction',
+        balanceAfterMinor: facts.balanceAfterMinor,
+        status: 'POSTED',
+      },
+    });
+
+    // The link is what makes the number explainable (invariant I6): every
+    // transaction can name the observations it was assembled from.
+    await tx.transactionObservation.update({
+      where: { id: facts.id },
+      data: { transactionId },
+    });
+
+    this.logger.debug(`Admitted observation ${facts.id} as ${transactionId}`);
+
+    return transactionId;
   }
 
   /**

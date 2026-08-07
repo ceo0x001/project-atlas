@@ -40,6 +40,16 @@ export const observationInputSchema = z.object({
   observedAt: z.string().datetime({ offset: true }),
   balanceAfterMinor: minorUnits.nullish(),
   description: z.string().max(500).nullish(),
+  /**
+   * The bank's own reference for this entry, when the source states one.
+   *
+   * Reconciliation's strongest signal by a wide margin: two entries the bank labelled
+   * identically are the same entry, which is the only evidence that earns an automatic
+   * merge without corroboration from the reported balance (ADR-008 §4). Optional because
+   * most SMS alerts omit it and no parse template extracts it yet — the field exists so
+   * that matching is not silently unreachable once they do.
+   */
+  rawReference: z.string().max(128).nullish(),
   accountLast4: z
     .string()
     .regex(/^\d{4}$/, { message: 'must be exactly four digits' })
