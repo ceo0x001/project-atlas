@@ -83,13 +83,26 @@ describe('row-level security covers every user-scoped table', () => {
       ORDER BY c.relname
     `;
 
-    // `device_credentials` is the single deliberate exemption: it is the table that
-    // establishes which tenant is calling, so it cannot be gated by tenancy.
-    // `outbox_events` is infrastructure, written and drained by the process itself
-    // and never served to a client.
+    // Three deliberate exemptions, and this list is the whole audit surface for them —
+    // anything appearing here that is not justified below is a cross-tenant leak.
+    //
+    // `device_credentials` and `phone_identities` are the tables that *establish* which
+    // tenant is calling, so they cannot be gated by tenancy without circularity:
+    // `device_credentials` maps a bearer token to an identity, and `phone_identities` maps
+    // a verified phone number to one. Both hold identifiers and no financial data, and both
+    // exist so `users` itself can stay fully protected — a lookup by phone against `users`
+    // matches zero rows under its policy, which would silently create duplicate accounts.
+    //
+    // `outbox_events` is infrastructure, written and drained by the process itself and never
+    // served to a client; the relay legitimately reads across tenants.
+    //
+    // `auth_challenges` is absent from this list on purpose: it has no `userId` column, since
+    // on a first sign-in there is no user yet. It is nonetheless RLS-exempt, documented in its
+    // own migration.
     expect(unprotected.map((row) => row.table_name)).toEqual([
       'device_credentials',
       'outbox_events',
+      'phone_identities',
     ]);
   });
 

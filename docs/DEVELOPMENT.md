@@ -5,7 +5,7 @@
 | Piece                    | State                                                                                                   |
 | ------------------------ | ------------------------------------------------------------------------------------------------------- |
 | `packages/shared-kernel` | Builds, 66 tests, lint clean                                                                            |
-| `apps/api`               | Builds, boots, 420 unit tests + 115 integration, lint clean                                             |
+| `apps/api`               | Builds, boots, 449 unit tests + 137 integration, lint clean                                             |
 | SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                           |
 | Ledger                   | Read path, admission, balance anchoring; RLS enforced and proven                                        |
 | Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                                     |
@@ -17,7 +17,7 @@
 | **Live, end to end**     | **Working on two-tier routing** — Haiku 4.5 answers, Opus 5 on escalation                               |
 | Reconciliation           | **Complete** — matching, merge, split, gap detection, and endpoints to answer questions                 |
 | Durable outbox relay     | **Working** — leased claim with `SKIP LOCKED`, backoff, dead-letter, pruning (no Temporal)              |
-| User authentication      | Not started — no HTTP device-enrolment route yet, deliberately                                          |
+| User authentication      | **Working** — phone OTP, first sign-in creates the user, device enrolled over HTTP                      |
 | `apps/mobile`            | `flutter analyze` + `flutter test` **green in CI**; never compiled locally (no SDK)                     |
 | CI                       | **Green** since the first run — Backend ~1.5 min, Mobile ~2 min ([ci.yml](../.github/workflows/ci.yml)) |
 
@@ -50,6 +50,60 @@ CI with an error that looks like a code defect, and the instinct will be to debu
 code rather than the workflow. Either drop the variable until something needs it, or add
 the service container in the same commit as the code that dials it, where the reason is
 self-evident.
+
+## Sign-in
+
+`POST /v1/auth/start` sends a six-digit code; `POST /v1/auth/verify` exchanges it for a
+device token. First sign-in creates the user — Nigeria is phone-first, and a password would
+be another secret to breach for no benefit when the phone is already the identifier.
+
+This is the only unauthenticated surface in the application and the one that mints
+credentials, so what it **declines** to say matters as much as what it does.
+
+### Six digits is defensible only because of three limits together
+
+The security does not come from the code's entropy — a million possibilities is nothing. It
+comes from single use, a five-attempt cap, and a ten-minute expiry, all enforced against the
+database so they hold across instances and restarts. Remove any one and the code is
+trivially brute-forceable. The hash at rest is defence in depth only: six digits reverse in
+milliseconds, so it protects against a log line or an opened backup, not against an attacker
+with the table.
+
+### What the endpoints refuse to reveal
+
+- **`start` answers identically** whether or not a number is registered. Branching would
+  turn it into a directory of who banks with Atlas.
+- **`verify` returns one uniform 401** for every rejection. Distinguishing wrong-code from
+  expired from already-used would tell an attacker which limit they hit, and therefore which
+  to work around.
+- **A throttled number still gets a normal-looking challenge**, carrying a code that can
+  never match. Refusing visibly would let an attacker probe where the ceiling is.
+
+### Two bugs the tests caught, both worth knowing
+
+**The throttling decoy was defeatable.** It originally stored the hash of _another
+six-digit code_ — and six digits is brute-forceable, so the decoy was itself a working
+credential. It now hashes 256 bits, putting the preimage outside the space a submission can
+ever occupy. The integration test found this by brute-forcing the hash exactly as an attacker
+would.
+
+**Looking up a user by phone returned nothing.** `users` is under RLS keyed on
+`id = atlas.user_id`, so a read _by phone_ — all we know at that point — matches zero rows
+however it is written, and the code then tried to create a duplicate. Hence
+`phone_identities`, a deliberately RLS-exempt mapping carrying the same bootstrap rationale
+as `device_credentials`. It cascades on user deletion, and the migration deletes orphans
+before adding the constraint — which it had to, because one already existed.
+
+### The SMS gateway is a port, and production is blocked on purpose
+
+`OtpSender` is an interface with one development implementation that logs the code. That let
+the whole flow be built and tested before choosing and paying for a Nigerian gateway.
+
+The danger is that sender reaching production and writing live codes into a log aggregator,
+so **`parseEnv` refuses to start when `NODE_ENV=production` and `OTP_SENDER=log`.** Since
+`log` is the only value, production cannot boot at all yet. That is deliberate and pinned by
+a test, so removing the check to "unblock a deploy" fails the build rather than shipping the
+hole.
 
 ## The outbox relay
 

@@ -66,6 +66,7 @@ model User {
   reconciliationEvents ReconciliationEvent[]
   suspectedDuplicates  SuspectedDuplicate[]
   suspectedGaps        SuspectedGap[]
+  phoneIdentity        PhoneIdentity?
 
   @@map("users")
 }
@@ -127,6 +128,68 @@ model DeviceCredential {
 
   @@index([userId])
   @@map("device_credentials")
+}
+
+/// Maps a phone number to the user it identifies.
+///
+/// Exists because `users` is under row-level security keyed on `id = atlas.user_id`, so a
+/// lookup *by phone* — before any identity is established — matches zero rows. Without this
+/// table, signing in an existing user silently fails and then attempts to create a duplicate.
+///
+/// The third and last RLS-exempt table, on the same bootstrap rationale as
+/// `device_credentials` and `auth_challenges`: it is consulted to discover who is calling, so
+/// gating it by the answer would be circular. It holds a phone number and a user id and
+/// nothing else — no financial data — and `users` itself stays fully protected.
+model PhoneIdentity {
+  phoneE164 String   @id
+  userId    String   @unique
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  /// Cascades so erasing a user takes their phone mapping with them. Without it, a deleted
+  /// user leaves a mapping pointing at nothing and the next sign-in on that number fails
+  /// against a foreign key instead of creating a fresh account — which right-to-erasure
+  /// would hit on the very first request.
+  ///
+  /// The relation is for referential integrity only. This table must never be *joined* to
+  /// `users` during sign-in: `users` is under row-level security, so the join would return
+  /// nothing, which is the failure this table exists to avoid.
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("phone_identities")
+}
+
+/// A phone sign-in challenge.
+///
+/// Deliberately NOT under row-level security, and the second table with that exemption
+/// after `device_credentials`. The reason is the same: RLS decides visibility from
+/// `atlas.user_id`, but this table is consulted *before* any identity exists — the whole
+/// point is to establish who is calling. Gating it by tenancy would be circular, and on a
+/// first sign-in there is no user row to gate against yet.
+///
+/// It is safe to exempt because it holds no financial data and nothing durable: a phone
+/// number, a hashed six-digit code, and counters that expire within ten minutes.
+model AuthChallenge {
+  id        String @id
+  phoneE164 String
+
+  /// SHA-256 of the code. Defence in depth only — six digits are brute-forceable in
+  /// milliseconds — so the real protection is single use, the attempt cap, and expiry.
+  codeHash String
+
+  /// Wrong guesses so far. At `MAX_OTP_ATTEMPTS` the challenge is dead, which is what makes
+  /// a six-digit secret defensible.
+  attempts Int @default(0)
+
+  /// Set the moment a correct code is accepted. A challenge is single use: without this a
+  /// correct guess could be replayed to enrol unlimited devices.
+  consumedAt DateTime? @db.Timestamptz(3)
+
+  expiresAt DateTime @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  /// Supports the per-phone rate limit, which counts recent challenges for a number.
+  @@index([phoneE164, createdAt])
+  @@map("auth_challenges")
 }
 
 enum ConsentScope {

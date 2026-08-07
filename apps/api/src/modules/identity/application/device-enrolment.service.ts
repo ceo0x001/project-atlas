@@ -7,11 +7,13 @@ import { issueDeviceToken } from '../domain/device-token';
 /**
  * Registers a device and issues its bearer token.
  *
- * There is deliberately **no HTTP endpoint** for this yet. Enrolment must be
- * authorised by the user who owns the account, and user authentication (passkeys plus
- * OTP fallback) is not built. Exposing an open enrolment route would let anyone mint
- * a credential for any user id — so the capability exists as a service, used by tests
- * and by the auth flow when it lands, and is not reachable from the network.
+ * There is still deliberately **no HTTP endpoint** on this class, and there should not be:
+ * it takes a `userId` directly, so exposing it would let anyone mint a credential for any
+ * account. Enrolment reachable from the network goes through `PhoneAuthService`, which
+ * derives the user from a verified one-time code rather than from the request body.
+ *
+ * This remains the seam for enrolling a device once identity is already established —
+ * adding a second device from an authenticated session, or a test setting up a fixture.
  */
 
 export interface EnrolDeviceInput {

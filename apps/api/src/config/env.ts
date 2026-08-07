@@ -30,6 +30,16 @@ const baseSchema = z.object({
   TEMPORAL_NAMESPACE: z.string().default('default'),
   TEMPORAL_TASK_QUEUE: z.string().default('atlas-core'),
 
+  /**
+   * How one-time sign-in codes are delivered.
+   *
+   * `log` writes the code to the application log and sends nothing — usable on a laptop
+   * without an SMS account, and a security hole in any deployed environment. The refinement
+   * below refuses to start in production while it is selected, because "remember not to
+   * deploy with the dev sender" is not a security control.
+   */
+  OTP_SENDER: z.enum(['log']).default('log'),
+
   ANTHROPIC_API_KEY: z.string().optional(),
   /**
    * Two tiers. The loop starts on `FAST` and escalates to `DEEP` only when the cheap
@@ -82,6 +92,21 @@ const envSchema = baseSchema.superRefine((env, ctx) => {
         message: `${key} is required when NODE_ENV=production`,
       });
     }
+  }
+
+  // The development sender writes live sign-in codes into the log. Reaching production with
+  // it selected would publish credentials to whatever aggregates logs, so the process
+  // refuses to start rather than running insecurely. `OTP_SENDER` currently has only this
+  // one value, which means production cannot boot until a real gateway is implemented — a
+  // deliberate, visible block rather than a quiet vulnerability.
+  if (env.OTP_SENDER === 'log') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['OTP_SENDER'],
+      message:
+        'OTP_SENDER=log writes sign-in codes to the log and must not be used in production; ' +
+        'implement and select a real SMS sender',
+    });
   }
 });
 
