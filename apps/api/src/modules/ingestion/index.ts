@@ -10,4 +10,10 @@ export * from './domain/parsing/dedupe-key';
 export * from './domain/parsing/template-engine';
 export * from './domain/parsing/template-validator';
 export * from './domain/parsing/transforms';
+export { MAX_STATEMENT_BYTES } from './api/statement.dto';
+export {
+  type ImportOutcome,
+  type ImportStatementInput,
+  StatementImportService,
+} from './application/statement-import.service';
 export { IngestionModule } from './ingestion.module';

@@ -13,6 +13,8 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ENV, type Env } from './config/env';
 import { stopTelemetry } from './observability/telemetry';
+import type { NestExpressApplication } from '@nestjs/platform-express';
+import { configureApp } from './configure-app';
 import { installBigIntSerializer } from './shared/serialization/bigint';
 
 // Money is BigInt everywhere (ADR-003); without this the first response carrying
@@ -20,7 +22,8 @@ import { installBigIntSerializer } from './shared/serialization/bigint';
 installBigIntSerializer();
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  configureApp(app);
   const logger = new Logger('Bootstrap');
 
   // Lets Nest run onModuleDestroy hooks (Prisma disconnect) on SIGTERM.

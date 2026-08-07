@@ -5,7 +5,7 @@
 | Piece                    | State                                                                                                   |
 | ------------------------ | ------------------------------------------------------------------------------------------------------- |
 | `packages/shared-kernel` | Builds, 66 tests, lint clean                                                                            |
-| `apps/api`               | Builds, boots, 449 unit tests + 137 integration, lint clean                                             |
+| `apps/api`               | Builds, boots, 513 unit tests + 152 integration, lint clean                                             |
 | SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                           |
 | Ledger                   | Read path, admission, balance anchoring; RLS enforced and proven                                        |
 | Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                                     |
@@ -50,6 +50,91 @@ CI with an error that looks like a code defect, and the instinct will be to debu
 code rather than the workflow. Either drop the variable until something needs it, or add
 the service container in the same commit as the code that dials it, where the reason is
 self-evident.
+
+## Statement import
+
+`POST /v1/statements/import` takes a CSV and backfills history the SMS feed never saw.
+`GET /v1/statements` reads back past attempts. Three outcomes, and the distinction is the
+product:
+
+| Outcome     | Meaning                                                         |
+| ----------- | --------------------------------------------------------------- |
+| `COMPLETED` | The statement's own arithmetic closed. Everything was imported. |
+| `REJECTED`  | It was read and did **not** add up. **Nothing** was imported.   |
+| `FAILED`    | It could not be read at all — a different fix from a rejection. |
+
+**There is deliberately no way to force a partial import.** A statement that does not
+reconcile is a parse we do not understand, and importing the rows we happened to read would
+produce a total wrong by exactly the ones we missed, invisibly. That is the single failure this
+feature exists to prevent.
+
+### The gate, strongest check first
+
+1. **The running-balance chain.** Each row's printed balance must equal the previous one plus
+   that row's signed amount. This catches a missing row, a duplicate, a misread amount and a
+   wrong direction — at the exact line where it happened, with both figures in the message.
+2. **Endpoints only**, when the layout prints no balance but the uploader supplies the
+   statement's stated opening and closing. Weaker: two errors that cancel out pass, and there
+   is a test pinning that weakness so nobody mistakes it for the chain.
+3. **Neither available ⇒ rejected.** An import that cannot be checked is not a safer version of
+   one that fails a check; it is the same risk with the warning removed.
+
+**One blind spot, found by a failing test and now closed.** The opening balance is derived from
+the first row, so if _that_ row's direction were read backwards the derived opening absorbs the
+error and the chain still closes. Every later row is protected. Supplying the statement's stated
+opening closes the gap — which is the reason to send it even for a file that has balances.
+
+### Why statement rows are observations, not transactions
+
+This is where M2 pays off. A row describing a purchase already known from an SMS alert is
+**reconciled into that transaction** rather than added beside it, so a backfill cannot double
+someone's spending. Nothing in the import code knows about matching — it writes observations and
+the ledger decides. Re-uploading an overlapping statement is therefore free, and there is an
+integration test asserting the alert's narration survives the merge while the statement's
+figures inform it.
+
+### No parser knows any specific bank
+
+There is no table of per-bank CSV layouts, deliberately. No real GTBank, Access or Zenith export
+has been seen, and encoding a guess would be the same mistake as inventing SMS templates: it
+would look like support for a bank while quietly producing wrong numbers. Columns are detected
+from header aliases, and **the gate is what makes that safe** — a mis-detected column breaks the
+arithmetic, so a wrong mapping is caught rather than trusted. A real export that cannot be read
+needs a new header alias and a fixture, not a new parser.
+
+The one parse decision the gate cannot protect is **day-first versus month-first dates**.
+`03/04/2026` is 3 April here and 4 March in the US, and reading it wrong moves a transaction
+between months while leaving the arithmetic intact. Resolved by locale, and pinned by a test.
+
+### Not Temporal, and ADR-007 narrowed again
+
+[ADR-007](adr/007-temporal-day-one.md) expected this to be the process that earned Temporal. It
+does not: there is nothing to compensate (a rejected import wrote nothing), no timer, no human
+wait measured in days, and a re-run is idempotent because every row carries a
+`statementRowDedupeKey`. What it needs is a visible state machine, which `statement_imports`
+already is. **Temporal is now unused across all five processes it was justified by**, and the
+honest conclusion is that v1 may not need it at all.
+
+### The document is not retained
+
+`objectKey` holds a SHA-256 of the contents; the file is parsed and discarded. That is a real
+limitation — an import cannot be re-parsed if the parser later improves — and for now a
+deliberate one: retaining bank statements means deciding about encryption at rest and NDPR
+retention, and holding fewer copies of someone's financial history is the safer default until
+those decisions are made.
+
+### Two configuration bugs this surfaced
+
+**The BigInt serializer only existed in `main.ts`.** Money is BigInt throughout, so any response
+carrying an amount threw `Do not know how to serialize a BigInt` in every context that boots the
+app another way — including every integration test. A safety property that depends on which file
+started the process is not a safety property; it now installs at module load.
+
+**Express's 100 kB default body limit made the documented 1 MiB statement limit fiction**, and
+the fix needed a factor of two rather than a small margin: a CSV is mostly newlines and JSON
+escapes each as two characters, so a 1 MiB file arrives as ~2 MiB of body. Configured once in
+`configure-app.ts` and applied by both `main.ts` and the tests, so the server under test is the
+one that ships.
 
 ## Sign-in
 

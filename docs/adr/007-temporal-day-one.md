@@ -76,3 +76,52 @@ An ADR that the code contradicts is worse than no ADR: it teaches the wrong thin
 confidently. The reasoning above is also the reasoning a future contributor needs in order
 to decide correctly the next time something periodic shows up — and the answer is not
 always "no Temporal", it is "does this process have checkpointable state".
+
+---
+
+## Amendment 2 — Temporal is unused, and may not be needed in v1 (2026-08-07)
+
+Statement import was the process Amendment 1 named as the one that would genuinely earn
+Temporal. Implementing it showed that it does not:
+
+- **Nothing to compensate.** A rejected import has written no observations, so there is no
+  partial state to unwind — the gate runs before anything is persisted.
+- **No timer, no long human wait.** Rejection is a status on a `statement_imports` row that a
+  user reads back whenever they like, not a suspended execution waiting for a signal.
+- **A re-run is idempotent by construction.** Every row carries a `statementRowDedupeKey`, so
+  the recovery story for a crash mid-import is "upload it again", and the recovery story for a
+  crashed _event dispatch_ is the outbox relay that already exists.
+- **What it needs is a visible state machine**, which the schema already models. A workflow
+  would add a second durable record of the same progress beside that row, able to disagree
+  with it.
+
+That is now **five for five**: reconciliation, the outbox relay, and statement import all
+turned out not to need it, and template synthesis and proactive schedules are unbuilt. Temporal
+has never been stood up.
+
+### Amended decision
+
+Temporal is not part of v1. The test for reversing this is concrete — a process earns it when
+it needs at least one of:
+
+- **compensating actions**, because partial work must be undone rather than simply retried;
+- **timers spanning days**, where a durable clock beats a status column and a query;
+- **a human wait measured in days**, where the process must survive as a suspended execution;
+- **fan-out with a join**, where many parallel steps must be awaited as one unit.
+
+Money movement would qualify on the first count, and money movement is explicitly out of scope
+for v1 (read-only CFO). That is not a coincidence: the reason nothing here has earned Temporal
+is that a read-only system has nothing to unwind.
+
+### Why this is recorded rather than quietly dropped
+
+The original ADR was not foolish — it was written before the shape of any of these processes was
+known, and "retrofitting durability is the expensive path" is a real argument. What it got wrong
+was applying that argument to _everything periodic or retrying_, which is most of a backend.
+The cost of the error was small precisely because it was written down and then checked against
+each process instead of assumed.
+
+Standing Temporal up now would mean carrying an unused dependency — a container to run, a worker
+to deploy, determinism constraints to respect — for a benefit no current process claims. If
+volume or operational visibility later makes it worth having, this amendment is where to argue
+against.
