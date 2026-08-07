@@ -1,3 +1,4 @@
+import type { ModelTier } from './model-tier';
 import type { ToolDefinition } from './tool';
 
 /**
@@ -52,6 +53,8 @@ export interface LlmTurn {
 }
 
 export interface LlmRequest {
+  /** Which tier to ask. The loop escalates from 'fast' to 'deep' on its own. */
+  readonly tier: ModelTier;
   /** Stable across users and requests, so it can be cached by the provider. */
   readonly systemStable: string;
   /** Per-user, per-request context. Placed after the cache breakpoint. */

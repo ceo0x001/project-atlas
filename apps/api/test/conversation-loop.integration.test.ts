@@ -36,6 +36,8 @@ const accountId = idFromSeed<'AccountId'>(5_100);
 /** Returns scripted turns in order and records what it was asked. */
 class ScriptedLlm implements LlmPort {
   readonly requests: LlmRequest[] = [];
+  /** Which tier each call asked for, in order — the routing assertion. */
+  readonly tiers: string[] = [];
   private queue: LlmTurn[] = [];
 
   script(...turns: Partial<LlmTurn>[]): void {
@@ -47,7 +49,7 @@ class ScriptedLlm implements LlmPort {
       outputTokens: 50,
       cacheCreationInputTokens: 0,
       cacheReadInputTokens: 0,
-      model: 'claude-opus-5',
+      model: 'claude-haiku-4-5',
       raw: [],
       ...turn,
     }));
@@ -55,6 +57,7 @@ class ScriptedLlm implements LlmPort {
 
   async complete(request: LlmRequest): Promise<LlmTurn> {
     this.requests.push({ ...request, messages: [...request.messages] });
+    this.tiers.push(request.tier);
 
     const next = this.queue.shift();
     if (!next) throw new Error('ScriptedLlm ran out of turns — the loop asked more than expected');
@@ -169,6 +172,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   llm.requests.length = 0;
+  llm.tiers.length = 0;
   await owner.conversationTurn.deleteMany({ where: { userId } });
   await owner.conversationSession.deleteMany({ where: { userId } });
 });
@@ -227,8 +231,8 @@ describe('the grounded happy path', () => {
     // Two model calls at 100 in / 50 out, priced at Opus 5's 5 and 25 µUSD per token.
     expect(turns[1]!.inputTokens).toBe(200);
     expect(turns[1]!.outputTokens).toBe(100);
-    // No cache activity in the scripted turns, so this reduces to input+output.
-    expect(turns[1]!.costMicroUsd).toBe(200 * 5 + 100 * 25);
+    // Two fast-tier calls, no cache activity: Haiku's 1 and 5 micro-USD per token.
+    expect(turns[1]!.costMicroUsd).toBe(200 * 1 + 100 * 5);
     expect(turns[1]!.latencyMs).not.toBeNull();
   });
 });
@@ -387,12 +391,18 @@ describe('failure handling', () => {
   });
 
   it('surfaces a refusal without reading response content', async () => {
-    llm.script({ stopReason: 'refusal', text: '' });
+    // A refusal escalates first — a cheap model declining a benign money question is
+    // more likely than the capable one doing so. Only a refusal from both is final.
+    llm.script(
+      { stopReason: 'refusal', text: '' },
+      { stopReason: 'refusal', text: '', model: 'claude-opus-5' },
+    );
 
     const answer = await service.ask({ userId, question: 'something disallowed' });
 
     expect(answer.text).toBe('I am not able to help with that.');
     expect(answer.groundingStatus).toBe('NOT_APPLICABLE');
+    expect(llm.tiers).toEqual(['fast', 'deep']);
   });
 });
 
@@ -452,5 +462,69 @@ describe('sessions', () => {
     expect(second.sessionId).toBe(first.sessionId);
     expect(await owner.conversationSession.count({ where: { userId } })).toBe(1);
     expect(await owner.conversationTurn.count({ where: { userId } })).toBe(4);
+  });
+});
+
+describe('model routing', () => {
+  it('answers on the cheap tier and never touches the expensive one', async () => {
+    llm.script(askedForAugustSpending, { text: 'You spent ₦12,500.00.' });
+
+    const answer = await service.ask({ userId, question: 'How much did I spend this month?' });
+
+    // The whole point: the common case costs Haiku money, not Opus money.
+    expect(llm.tiers).toEqual(['fast', 'fast']);
+    expect(answer.model).toBe('claude-haiku-4-5');
+    expect(answer.groundingStatus).toBe('PASSED');
+  });
+
+  it('escalates to the deep tier when the cheap answer cannot be verified', async () => {
+    llm.script(
+      askedForAugustSpending,
+      { text: 'You spent ₦99,999.00.' },
+      { text: 'You spent ₦12,500.00.', model: 'claude-opus-5' },
+    );
+
+    const answer = await service.ask({ userId, question: 'How much did I spend this month?' });
+
+    expect(llm.tiers).toEqual(['fast', 'fast', 'deep']);
+    expect(answer.model).toBe('claude-opus-5');
+    expect(answer.groundingStatus).toBe('REGENERATED');
+  });
+
+  it('prices an escalated turn per model, not at one blended rate', async () => {
+    llm.script(
+      askedForAugustSpending,
+      { text: 'You spent ₦99,999.00.' },
+      { text: 'You spent ₦12,500.00.', model: 'claude-opus-5' },
+    );
+
+    const answer = await service.ask({ userId, question: 'How much did I spend this month?' });
+
+    // Two Haiku calls (1/5) plus one Opus call (5/25). Charging the whole turn at
+    // either tier's rate would misreport it in one direction or the other.
+    const haiku = 200 * 1 + 100 * 5;
+    const opus = 100 * 5 + 50 * 25;
+    expect(answer.costMicroUsd).toBe(haiku + opus);
+  });
+
+  it('escalates when the cheap tier produces no answer at all', async () => {
+    // Five tool calls without ever settling: treated as untrusted, not shipped.
+    const spin = {
+      stopReason: 'tool_use' as const,
+      toolCalls: [
+        { id: 'toolu_x', name: 'query_ledger', input: { measure: 'spending', period: 'today' } },
+      ],
+    };
+
+    llm.script(spin, spin, spin, spin, spin, {
+      text: 'You spent ₦0.00 today.',
+      model: 'claude-opus-5',
+    });
+
+    const answer = await service.ask({ userId, question: 'spend today?' });
+
+    expect(llm.tiers.slice(0, 5)).toEqual(['fast', 'fast', 'fast', 'fast', 'fast']);
+    expect(llm.tiers.at(-1)).toBe('deep');
+    expect(answer.model).toBe('claude-opus-5');
   });
 });

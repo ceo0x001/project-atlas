@@ -31,8 +31,13 @@ const baseSchema = z.object({
   TEMPORAL_TASK_QUEUE: z.string().default('atlas-core'),
 
   ANTHROPIC_API_KEY: z.string().optional(),
-  ANTHROPIC_MODEL_CONVERSATION: z.string().default('claude-opus-5'),
-  ANTHROPIC_MODEL_BACKGROUND: z.string().default('claude-haiku-4-5'),
+  /**
+   * Two tiers. The loop starts on `FAST` and escalates to `DEEP` only when the cheap
+   * answer fails the grounding gate — measured cost on a single Opus-tier model was
+   * $8-11 per user per month at ten questions a day (risk R4).
+   */
+  ANTHROPIC_MODEL_FAST: z.string().default('claude-haiku-4-5'),
+  ANTHROPIC_MODEL_DEEP: z.string().default('claude-opus-5'),
   /**
    * Reasoning effort for conversation turns. Kept in configuration rather than in
    * code because it is the primary latency/cost lever and wants sweeping against

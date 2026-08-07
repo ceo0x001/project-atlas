@@ -31,47 +31,62 @@ node apps/api/dist/cli/ask.js --user <userId> "how much did I spend this month?"
 Runs the real loop against the real ledger and the real model. A development tool,
 not a product surface — it bypasses HTTP and device auth by design.
 
-## Measured on real data — and it changes a recommendation
+## Measured on real data — model routing
 
-Verified live against Claude Opus 5 with a seeded ledger. Answers are correct and
-grounded; **cost and latency are both far outside target**, and they point the same way.
+Both figures below are measured live against a seeded ledger, not estimated.
 
-| Metric               | Measured            | Target                 |
-| -------------------- | ------------------- | ---------------------- |
-| Cost per question    | **$0.026 – $0.036** | needs to be ~10x lower |
-| Latency per question | **9 – 15 s**        | < 1.5 s to first audio |
+| Metric              | Opus 5 only  | Haiku-first routing | Change          |
+| ------------------- | ------------ | ------------------- | --------------- |
+| Cost per question   | $0.026–0.036 | **$0.0042**         | **~7x cheaper** |
+| Latency             | 9–15 s       | **3.0–3.6 s**       | **~3x faster**  |
+| Correct answers     | 5/5          | **4/4**             | unchanged       |
+| Escalations to Opus | n/a          | **0 of 4**          | —               |
 
-At ~$0.03 a question and ten questions a day, inference alone is **$8–11 per user
-per month** — roughly ₦13,000–17,600. That is not a viable price for a Nigerian
-consumer product, and it is risk R4 arriving with hard numbers rather than as a
-worry. Latency is 6–10x over target for the same reason: two sequential Opus 5 calls
-per question.
+At ten questions a day that is **~$1.25 per user per month** — roughly ₦2,000, which a
+consumer product can carry. The single-tier figure was $8–11, which it could not.
 
-Both point at the same conclusion: **Opus 5 is the wrong default for the common
-case.** The levers, in order of impact:
+How it works: the loop asks the fast tier first, and the grounding gate's verdict is
+what decides whether the question needed a better model. A fabricated figure triggers
+the same escalation path that already existed for regeneration, so routing added a
+decision, not a second mechanism.
 
-1. **Model routing.** Haiku 4.5 is $1/$5 per MTok against Opus 5's $5/$25 — 5x
-   cheaper and materially faster. Most questions here are one tool call and one
-   sentence. Route to Haiku, escalate to Opus only when the cheap model fails or the
-   grounding gate degrades. This is the architectural fix.
-2. **Shorter answers.** Output is roughly half the cost, and every reply currently
-   appends a data-completeness caveat because the system prompt asks for it. Saying
-   it once per session rather than once per answer cuts output materially.
-3. **Streaming** (M3 anyway). Does nothing for cost, but collapses _perceived_
-   latency: first token in ~2s instead of a 10s wait.
+**What routing does not fix.** The gate verifies magnitudes, not meaning. A cheaper
+model that queries _last_ month when the user said _this_ month returns a grounded,
+real, wrong answer. Mitigation is that every reply names the period it queried, so a
+reader can catch it — but this is the failure mode to watch as the question mix widens,
+and it is the reason the fast tier's period selection is measured rather than assumed.
 
-Lowering `ANTHROPIC_EFFORT` to `low` was measured and **did not help** — latency is
-dominated by round trips and generation, not thinking depth. Do not reach for effort
-as the latency lever here.
+### Two defects the measurement exposed
 
-### Cost telemetry was wrong at first
+**Cost was silently not recorded at all.** A request naming the alias
+`claude-haiku-4-5` comes back as `claude-haiku-4-5-20251001`, so the exact-match
+pricing lookup missed on every response and stored `null`. The null was deliberate —
+better than a wrong number — but it meant the cost SLO had no data. Fixed by matching
+on the alias prefix.
 
-Worth recording because the failure was silent: the first implementation priced only
-`usage.input_tokens`, which reports the _uncached remainder_. With prompt caching
-active (the cacheable prefix measures 1,521 tokens against Opus 5's 512 minimum),
-that under-reported real cost by 40–60%. Cache writes bill at 1.25x the input rate
-and reads at 0.1x, so all four components are now priced and all four are persisted
-per turn — which also makes cache hit rate observable.
+**The model reported it could not find a merchant that was there.** With no merchant
+records populated, it reached for the `merchant` filter, got an unresolved miss, and
+honestly reported the miss — when a description search would have found the
+transaction. Fixed by telling the model, in the per-request data notes, to search
+descriptions while merchants are unpopulated. "What did I spend at Shoprite?" went
+from _"I couldn't find a merchant called Shoprite"_ to **₦7,500**.
+
+Both were only visible by running real questions and reading the telemetry.
+
+### Prompt caching does not apply to the fast tier yet
+
+The minimum cacheable prefix is model-dependent and **not** monotonic across
+generations: 512 tokens on Opus 5 but **4,096 on Haiku 4.5**. Our cacheable prefix
+(tool schemas plus the stable system prompt) measures 1,521 tokens, so it caches on
+the deep tier and silently does not on the fast one — visible as
+`cacheReadInputTokens: 0` on every Haiku turn.
+
+This is a tradeoff, not a bug, and it resolves itself: input is ~83% of the fast
+tier's cost, so caching would take $0.0042 to roughly $0.001, and the prefix will cross
+4,096 tokens naturally as tools are added. Do not pad the prompt to reach it.
+
+Lowering `ANTHROPIC_EFFORT` was measured and did **not** reduce latency — the cost is
+round trips and generation, not thinking depth. Model choice was the lever.
 
 ## The M1 core, and what it guarantees
 

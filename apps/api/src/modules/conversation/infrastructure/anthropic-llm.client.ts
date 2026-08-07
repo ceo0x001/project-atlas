@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ENV, type Env } from '@config/env';
 import type { LlmPort, LlmRequest, LlmStopReason, LlmTurn } from '../domain/llm.port';
+import { type ModelTier, profileFor } from '../domain/model-tier';
 
 /**
  * The Anthropic implementation of the model port.
@@ -40,10 +41,15 @@ export class AnthropicLlmClient implements LlmPort {
       throw new ServiceUnavailableException('ANTHROPIC_API_KEY is not configured');
     }
 
+    const modelId = this.modelFor(request.tier);
+    const profile = profileFor(modelId);
+
     const message = await this.client.messages.create({
-      model: this.env.ANTHROPIC_MODEL_CONVERSATION,
+      model: modelId,
       max_tokens: MAX_OUTPUT_TOKENS,
-      output_config: { effort: this.env.ANTHROPIC_EFFORT },
+      // Conditional, not optional: `effort` is rejected outright by models that do
+      // not support it (Haiku 4.5), so sending it unconditionally breaks the fast tier.
+      ...(profile?.supportsEffort ? { output_config: { effort: this.env.ANTHROPIC_EFFORT } } : {}),
       system: [
         { type: 'text', text: request.systemStable, cache_control: { type: 'ephemeral' } },
         { type: 'text', text: request.systemContext },
@@ -96,6 +102,10 @@ export class AnthropicLlmClient implements LlmPort {
       model: message.model,
       raw: message.content,
     };
+  }
+
+  private modelFor(tier: ModelTier): string {
+    return tier === 'fast' ? this.env.ANTHROPIC_MODEL_FAST : this.env.ANTHROPIC_MODEL_DEEP;
   }
 }
 

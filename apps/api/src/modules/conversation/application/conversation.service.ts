@@ -15,9 +15,11 @@ import {
   type LlmMessage,
   LLM_PORT,
   type LlmPort,
+  type LlmRequest,
   type LlmToolResult,
   type LlmTurn,
 } from '../domain/llm.port';
+import { costMicroUsd, type ModelTier, type TokenUsage } from '../domain/model-tier';
 import type { CanvasSpec, GroundingFact, ToolContext } from '../domain/tool';
 import { TOOL_REGISTRY, type ToolRegistry } from '../domain/tool';
 import { buildGroundingCorrection, buildSystemContext, SYSTEM_STABLE } from './system-prompt';
@@ -26,34 +28,28 @@ import { buildGroundingCorrection, buildSystemContext, SYSTEM_STABLE } from './s
  * The agent loop (ARCHITECTURE §7.1, ADR-005).
  *
  * Ask the model, run whatever tools it calls, then refuse to speak any number the
- * tools did not return. The escalation is the point:
+ * tools did not return.
  *
- *   grounded            → answer as written
- *   ungrounded once     → one corrective attempt naming the untraceable figures
- *   ungrounded twice    → suppress the prose entirely and return the canvas
+ * Two mechanisms share one path. The grounding gate decides whether an answer can be
+ * trusted; the model router uses that same verdict to decide whether the question
+ * needed a better model. The escalation ladder:
  *
- * Atlas says less rather than saying something false. Every outcome is recorded per
- * turn, because a rising DEGRADED rate is the earliest signal of a prompt regression.
+ *   fast tier, grounded          → answer (the common case, ~5x cheaper)
+ *   fast tier, ungrounded        → escalate to the deep tier, naming the bad figures
+ *   deep tier, still ungrounded  → suppress the prose, return the canvas
+ *
+ * Atlas says less rather than saying something false, and pays for the expensive
+ * model only when the cheap one could not be trusted.
+ *
+ * **A caveat routing does not solve.** The gate verifies magnitudes, not meaning: a
+ * cheaper model that queries *last* month when the user said *this* month produces a
+ * grounded, real, wrong answer. That is why every reply names the period it queried —
+ * so the mistake is visible to the reader — and why the fast tier's period selection
+ * is worth measuring rather than assuming.
  */
 
 /** Bounded so a confused model cannot loop indefinitely at the user's expense. */
 const MAX_TOOL_ITERATIONS = 5;
-
-/**
- * Micro-USD per token, per model. Recording a *wrong* cost is worse than recording
- * none, so an unknown model stores null rather than a guess. Update when pricing does.
- */
-const PRICING_MICRO_USD_PER_TOKEN: Readonly<Record<string, { input: number; output: number }>> = {
-  'claude-opus-5': { input: 5, output: 25 },
-  'claude-opus-4-8': { input: 5, output: 25 },
-  'claude-sonnet-5': { input: 3, output: 15 },
-  'claude-haiku-4-5': { input: 1, output: 5 },
-  'claude-fable-5': { input: 10, output: 50 },
-};
-
-/** Cache writes cost 1.25x the input rate; reads cost 0.1x. */
-const CACHE_WRITE_MULTIPLIER = 1.25;
-const CACHE_READ_MULTIPLIER = 0.1;
 
 export interface AskInput {
   readonly userId: UserId;
@@ -69,14 +65,14 @@ export interface ChatAnswer {
   readonly text: string | null;
   readonly canvas: CanvasSpec | null;
   readonly groundingStatus: GroundingStatus;
+  /** The model that produced the answer — reveals how often escalation happens. */
+  readonly model: string;
   readonly latencyMs: number;
-  /** Populated when the answer was suppressed, so a client can explain itself. */
+  readonly costMicroUsd: number | null;
   readonly degradedReason?: string;
 }
 
-/** Everything billable in a turn. Cache tokens are priced differently, so they
- *  cannot be folded into `inputTokens` without misreporting cost. */
-interface TokenUsage {
+interface MutableUsage {
   inputTokens: number;
   outputTokens: number;
   cacheCreationInputTokens: number;
@@ -88,7 +84,16 @@ interface UserProfile {
   readonly timeZone: string;
   readonly currency: CurrencyCode;
   readonly hasCategories: boolean;
+  readonly hasMerchants: boolean;
 }
+
+interface LoopOutcome {
+  readonly text: string;
+  readonly refused: boolean;
+  readonly model: string;
+}
+
+type PromptFrame = Omit<LlmRequest, 'messages' | 'tier'>;
 
 @Injectable()
 export class ConversationService {
@@ -121,16 +126,13 @@ export class ConversationService {
 
     const messages: LlmMessage[] = [{ role: 'user', text: input.question }];
     const facts: GroundingFact[] = [];
-    let canvas: CanvasSpec | null = null;
-    const usage: TokenUsage = {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreationInputTokens: 0,
-      cacheReadInputTokens: 0,
-    };
-    let model = this.env.ANTHROPIC_MODEL_CONVERSATION;
+    const canvasRef = { current: null as CanvasSpec | null };
 
-    const request = {
+    // Usage is keyed by model: the tiers are priced differently, so a turn that
+    // escalates cannot be costed from a single total.
+    const usageByModel = new Map<string, MutableUsage>();
+
+    const frame: PromptFrame = {
       systemStable: SYSTEM_STABLE,
       systemContext: buildSystemContext({
         displayName: profile.displayName,
@@ -142,26 +144,121 @@ export class ConversationService {
       tools: this.tools.definitions(),
     };
 
-    let answerText = '';
-    let refused = false;
+    const settle = (outcome: {
+      text: string | null;
+      status: GroundingStatus;
+      model: string;
+      reason?: string;
+    }): Promise<ChatAnswer> =>
+      this.persistAndReturn({
+        context,
+        question: input.question,
+        text: outcome.text,
+        canvas: canvasRef.current,
+        status: outcome.status,
+        model: outcome.model,
+        usageByModel,
+        startedAt,
+        ...(outcome.reason ? { degradedReason: outcome.reason } : {}),
+      });
+
+    // --- first attempt, on the cheap tier ---
+    const fast = await this.runLoop(
+      'fast',
+      frame,
+      messages,
+      facts,
+      canvasRef,
+      context,
+      usageByModel,
+    );
+
+    if (!fast.refused) {
+      const verdict = this.gate.verify(fast.text, facts);
+
+      if (verdict.grounded && fast.text !== '') {
+        return settle({
+          text: fast.text,
+          status: verdict.claimsChecked === 0 ? 'NOT_APPLICABLE' : 'PASSED',
+          model: fast.model,
+        });
+      }
+
+      const unverified = verdict.unverifiedClaims.map((claim) => claim.claim);
+      this.logger.warn(
+        `Fast tier unusable for turn ${turnId} (${unverified.join(', ') || 'no answer produced'}); escalating`,
+      );
+
+      if (unverified.length > 0) {
+        messages.push({ role: 'user', text: buildGroundingCorrection(unverified) });
+      }
+    } else {
+      this.logger.warn(`Fast tier refused turn ${turnId}; escalating`);
+    }
+
+    // --- escalation, on the deep tier ---
+    const deep = await this.runLoop(
+      'deep',
+      frame,
+      messages,
+      facts,
+      canvasRef,
+      context,
+      usageByModel,
+    );
+
+    if (deep.refused) {
+      return settle({
+        text: 'I am not able to help with that.',
+        status: 'NOT_APPLICABLE',
+        model: deep.model,
+      });
+    }
+
+    const retryVerdict = this.gate.verify(deep.text, facts);
+    if (retryVerdict.grounded && deep.text !== '') {
+      return settle({
+        text: deep.text,
+        status: retryVerdict.claimsChecked === 0 ? 'NOT_APPLICABLE' : 'REGENERATED',
+        model: deep.model,
+      });
+    }
+
+    // Even the deep tier could not be verified. Suppress the prose; the canvas
+    // renders from raw query results and stays trustworthy.
+    this.logger.error(`Grounding degraded for turn ${turnId} after escalation`);
+
+    return settle({
+      text: null,
+      status: 'DEGRADED',
+      model: deep.model,
+      reason:
+        'I could not verify the figures in my answer against your ledger, so I have shown the data instead.',
+    });
+  }
+
+  /** One tier's tool-calling loop, accumulating facts, canvas and usage as it goes. */
+  private async runLoop(
+    tier: ModelTier,
+    frame: PromptFrame,
+    messages: LlmMessage[],
+    facts: GroundingFact[],
+    canvasRef: { current: CanvasSpec | null },
+    context: ToolContext,
+    usageByModel: Map<string, MutableUsage>,
+  ): Promise<LoopOutcome> {
+    let model = tier === 'fast' ? this.env.ANTHROPIC_MODEL_FAST : this.env.ANTHROPIC_MODEL_DEEP;
 
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
-      const turn = await this.llm.complete({ ...request, messages });
+      const turn = await this.llm.complete({ ...frame, tier, messages });
 
-      accumulate(usage, turn);
       model = turn.model;
+      this.accumulate(usageByModel, turn);
 
-      // Read stop_reason before content: a refusal carries no usable answer, and
-      // indexing into content unconditionally would throw or return nothing.
-      if (turn.stopReason === 'refusal') {
-        refused = true;
-        break;
-      }
+      // Read stop_reason before content: a refusal carries no usable answer.
+      if (turn.stopReason === 'refusal') return { text: '', refused: true, model };
 
-      if (turn.toolCalls.length === 0) {
-        answerText = turn.text;
-        break;
-      }
+      if (turn.toolCalls.length === 0) return { text: turn.text, refused: false, model };
 
       messages.push({ role: 'assistant', raw: turn.raw });
 
@@ -170,78 +267,33 @@ export class ConversationService {
         const outcome = await this.runTool(call.name, call.input, context);
         results.push({ toolCallId: call.id, content: outcome.content, isError: outcome.isError });
         facts.push(...outcome.facts);
-        canvas = outcome.canvas ?? canvas;
+        if (outcome.canvas) canvasRef.current = outcome.canvas;
       }
 
       messages.push({ role: 'tool_results', results });
     }
 
-    if (refused) {
-      return this.persistAndReturn({
-        context,
-        question: input.question,
-        text: 'I am not able to help with that.',
-        canvas: null,
-        status: 'NOT_APPLICABLE',
-        startedAt,
-        usage,
-        model,
-      });
-    }
+    // Ran out of iterations without settling. Returned as an empty answer so the
+    // caller escalates or degrades, rather than shipping half-formed text.
+    this.logger.warn(`Tier ${tier} exhausted ${MAX_TOOL_ITERATIONS} iterations`);
 
-    const verdict = this.gate.verify(answerText, facts);
-    if (verdict.grounded) {
-      return this.persistAndReturn({
-        context,
-        question: input.question,
-        text: answerText,
-        canvas,
-        status: verdict.claimsChecked === 0 ? 'NOT_APPLICABLE' : 'PASSED',
-        startedAt,
-        usage,
-        model,
-      });
-    }
+    return { text: '', refused: false, model };
+  }
 
-    // One corrective attempt, naming the specific untraceable figures.
-    const unverified = verdict.unverifiedClaims.map((claim) => claim.claim);
-    this.logger.warn(`Grounding failed for turn ${turnId}: ${unverified.join(', ')}`);
+  private accumulate(usageByModel: Map<string, MutableUsage>, turn: LlmTurn): void {
+    const current = usageByModel.get(turn.model) ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    };
 
-    messages.push({ role: 'user', text: buildGroundingCorrection(unverified) });
+    current.inputTokens += turn.inputTokens;
+    current.outputTokens += turn.outputTokens;
+    current.cacheCreationInputTokens += turn.cacheCreationInputTokens;
+    current.cacheReadInputTokens += turn.cacheReadInputTokens;
 
-    const retry = await this.llm.complete({ ...request, messages });
-    accumulate(usage, retry);
-
-    const retryVerdict = this.gate.verify(retry.text, facts);
-    if (retryVerdict.grounded && retry.stopReason !== 'refusal') {
-      return this.persistAndReturn({
-        context,
-        question: input.question,
-        text: retry.text,
-        canvas,
-        status: 'REGENERATED',
-        startedAt,
-        usage,
-        model,
-      });
-    }
-
-    // Still unverified. Suppress the prose; the canvas renders from raw query
-    // results and so is trustworthy even when the narration is not.
-    this.logger.error(`Grounding degraded for turn ${turnId} after one retry`);
-
-    return this.persistAndReturn({
-      context,
-      question: input.question,
-      text: null,
-      canvas,
-      status: 'DEGRADED',
-      startedAt,
-      usage,
-      model,
-      degradedReason:
-        'I could not verify the figures in my answer against your ledger, so I have shown the data instead.',
-    });
+    usageByModel.set(turn.model, current);
   }
 
   private async runTool(
@@ -282,8 +334,8 @@ export class ConversationService {
       const reason = error instanceof Error ? error.message : String(error);
       this.logger.error(`Tool ${name} threw: ${reason}`);
 
-      // Surface the failure to the model rather than aborting the turn: it can
-      // often recover by asking a narrower question.
+      // Surfaced to the model rather than aborting the turn: it can often recover by
+      // asking a narrower question.
       return { content: `The tool failed: ${reason}`, isError: true, facts: [] };
     }
   }
@@ -297,13 +349,17 @@ export class ConversationService {
 
       if (!user) throw new Error(`User ${userId} not found`);
 
-      const categoryCount = await tx.category.count({ where: { userId } });
+      const [categoryCount, merchantCount] = await Promise.all([
+        tx.category.count({ where: { userId } }),
+        tx.merchant.count({ where: { userId } }),
+      ]);
 
       return {
         displayName: user.displayName,
         timeZone: user.timezone,
         currency: user.primaryCurrency as CurrencyCode,
         hasCategories: categoryCount > 0,
+        hasMerchants: merchantCount > 0,
       };
     });
   }
@@ -311,9 +367,9 @@ export class ConversationService {
   /**
    * What the ledger does and does not contain, stated to the model.
    *
-   * This is the highest-value part of the per-request prompt while Atlas is mid
-   * build: without it, the likeliest failure is a confident answer to a category
-   * question the ledger cannot answer at all.
+   * The highest-value part of the per-request prompt while Atlas is mid build:
+   * without it, the likeliest failure is a confident answer to a category question
+   * the ledger cannot answer at all.
    */
   private dataNotes(profile: UserProfile): readonly string[] {
     const notes = [
@@ -323,6 +379,15 @@ export class ConversationService {
     if (!profile.hasCategories) {
       notes.push(
         'Transactions are not categorised yet. A category filter will come back unresolved — say so rather than answering about all spending.',
+      );
+    }
+
+    if (!profile.hasMerchants) {
+      // Measured: without this, the model reaches for the merchant filter when the
+      // user names a shop, gets an unresolved miss, and reports it cannot find them —
+      // even though a description search would have found the transaction.
+      notes.push(
+        'Merchants are not identified as records yet. When the user names a shop or company, use the search field to match the alert description rather than the merchant filter.',
       );
     }
 
@@ -355,15 +420,17 @@ export class ConversationService {
     text: string | null;
     canvas: CanvasSpec | null;
     status: GroundingStatus;
-    startedAt: number;
-    usage: TokenUsage;
     model: string;
+    usageByModel: Map<string, MutableUsage>;
+    startedAt: number;
     degradedReason?: string;
   }): Promise<ChatAnswer> {
     const latencyMs = this.clock.nowMs() - args.startedAt;
+    const totals = this.totalUsage(args.usageByModel);
+    const cost = this.totalCost(args.usageByModel);
 
     await this.tenantScope.run(args.context.userId, async (tx) => {
-      await this.persistTurns(tx, args, latencyMs);
+      await this.persistTurns(tx, args, totals, cost, latencyMs);
     });
 
     return {
@@ -372,9 +439,49 @@ export class ConversationService {
       text: args.text,
       canvas: args.canvas,
       groundingStatus: args.status,
+      model: args.model,
       latencyMs,
+      costMicroUsd: cost,
       ...(args.degradedReason ? { degradedReason: args.degradedReason } : {}),
     };
+  }
+
+  private totalUsage(usageByModel: Map<string, MutableUsage>): TokenUsage {
+    const totals: MutableUsage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    };
+
+    for (const usage of usageByModel.values()) {
+      totals.inputTokens += usage.inputTokens;
+      totals.outputTokens += usage.outputTokens;
+      totals.cacheCreationInputTokens += usage.cacheCreationInputTokens;
+      totals.cacheReadInputTokens += usage.cacheReadInputTokens;
+    }
+
+    return totals;
+  }
+
+  /** Summed per model, because the tiers are priced differently. */
+  private totalCost(usageByModel: Map<string, MutableUsage>): number | null {
+    let total = 0;
+    let priced = false;
+
+    for (const [modelId, usage] of usageByModel) {
+      const cost = costMicroUsd(modelId, usage);
+
+      if (cost === null) {
+        this.logger.warn(`No pricing for model '${modelId}'; cost not recorded for this turn`);
+        return null;
+      }
+
+      total += cost;
+      priced = true;
+    }
+
+    return priced ? total : null;
   }
 
   private async persistTurns(
@@ -384,9 +491,10 @@ export class ConversationService {
       question: string;
       text: string | null;
       status: GroundingStatus;
-      usage: TokenUsage;
       model: string;
     },
+    totals: TokenUsage,
+    cost: number | null,
     latencyMs: number,
   ): Promise<void> {
     // Both halves of the exchange, in one transaction: a transcript missing the
@@ -411,42 +519,12 @@ export class ConversationService {
         groundingStatus: args.status,
         model: args.model,
         latencyMs,
-        inputTokens: args.usage.inputTokens,
-        outputTokens: args.usage.outputTokens,
-        cacheCreationInputTokens: args.usage.cacheCreationInputTokens,
-        cacheReadInputTokens: args.usage.cacheReadInputTokens,
-        costMicroUsd: this.costMicroUsd(args.model, args.usage),
+        inputTokens: totals.inputTokens,
+        outputTokens: totals.outputTokens,
+        cacheCreationInputTokens: totals.cacheCreationInputTokens,
+        cacheReadInputTokens: totals.cacheReadInputTokens,
+        costMicroUsd: cost,
       },
     });
   }
-
-  /**
-   * Prices all four billable components.
-   *
-   * Cache tokens are the easy thing to miss: `usage.input_tokens` reports only the
-   * *uncached* remainder, so pricing that field alone silently under-reports every
-   * cached request. Writes cost 1.25x the input rate, reads 0.1x.
-   */
-  private costMicroUsd(model: string, usage: TokenUsage): number | null {
-    const pricing = PRICING_MICRO_USD_PER_TOKEN[model];
-
-    if (!pricing) {
-      this.logger.warn(`No pricing for model '${model}'; cost not recorded`);
-      return null;
-    }
-
-    return Math.round(
-      usage.inputTokens * pricing.input +
-        usage.cacheCreationInputTokens * pricing.input * CACHE_WRITE_MULTIPLIER +
-        usage.cacheReadInputTokens * pricing.input * CACHE_READ_MULTIPLIER +
-        usage.outputTokens * pricing.output,
-    );
-  }
-}
-
-function accumulate(usage: TokenUsage, turn: LlmTurn): void {
-  usage.inputTokens += turn.inputTokens;
-  usage.outputTokens += turn.outputTokens;
-  usage.cacheCreationInputTokens += turn.cacheCreationInputTokens;
-  usage.cacheReadInputTokens += turn.cacheReadInputTokens;
 }
