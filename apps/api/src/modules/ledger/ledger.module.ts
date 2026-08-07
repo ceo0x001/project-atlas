@@ -1,7 +1,11 @@
 import { Module } from '@nestjs/common';
+import { IdentityModule } from '@modules/identity';
+import { DuplicateResolutionService } from './application/duplicate-resolution.service';
+import { GapDetectionService } from './application/gap-detection.service';
 import { ReconciliationService } from './application/reconciliation.service';
 import { TransactionAdmissionService } from './application/transaction-admission.service';
 import { LEDGER_QUERY_PORT } from './domain/ledger-query.port';
+import { ReconciliationController } from './api/reconciliation.controller';
 import { PrismaLedgerQueryRepository } from './infrastructure/prisma-ledger-query.repository';
 
 /**
@@ -18,9 +22,15 @@ import { PrismaLedgerQueryRepository } from './infrastructure/prisma-ledger-quer
  * exist to prevent.
  */
 @Module({
+  // Needed for `DeviceAuthGuard` on the reconciliation surface: resolving the caller is
+  // identity's job, and these endpoints change what money exists.
+  imports: [IdentityModule],
+  controllers: [ReconciliationController],
   providers: [
     { provide: LEDGER_QUERY_PORT, useClass: PrismaLedgerQueryRepository },
     ReconciliationService,
+    DuplicateResolutionService,
+    GapDetectionService,
     TransactionAdmissionService,
   ],
   exports: [LEDGER_QUERY_PORT],

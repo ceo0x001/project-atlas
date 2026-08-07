@@ -104,12 +104,41 @@ detection is a pure function over balance readings the ledger already holds. Tem
 scoped to the outbox relay and statement parsing, where durability across process death
 genuinely matters.
 
+### The HTTP surface
+
+`v1/reconciliation` exists because the matcher refuses to guess, so the questions it raises
+need somewhere to be answered:
+
+| Endpoint                      | Purpose                                             |
+| ----------------------------- | --------------------------------------------------- |
+| `GET  duplicates`             | Pairs awaiting an answer                            |
+| `POST duplicates/:id/resolve` | `MERGED` or `KEPT_SEPARATE`                         |
+| `POST split`                  | Move an observation onto its own transaction        |
+| `GET  gaps`                   | Money with no transaction to explain it             |
+| `POST gaps/resolve`           | `EXPLAINED` or `DISMISSED` — never creates anything |
+
+Answering a duplicate twice is refused rather than silently re-applied: the second answer
+may contradict the first, and a merge is not freely reversible. Resolving a gap that does
+not exist is also refused, or a client could accumulate dismissals for arbitrary transaction
+pairs and a real gap appearing between them later would arrive pre-dismissed.
+
+**Split is the reason an over-merge is survivable.** It moves an observation onto a new
+transaction and re-projects both, which brings hidden money back into the total — there is
+an integration test asserting exactly that round trip. It always creates a _new_
+transaction rather than reviving the superseded row, because reviving an id whose absorption
+other records already reference would make the audit trail contradict itself.
+
 ### Known gap
 
 `rawReference` is plumbed end to end — wire contract, storage, matching — but **no parse
 template extracts one yet**, so reference-based auto-merge is dormant and matching relies
 on balance corroboration. Nigerian alerts almost always report a balance, so this works
 today; extracting references is a template-DSL change that would make it stronger.
+
+`ledger` now depends on `identity` in `MODULE_DEPENDENCIES`, which it did not before. The
+boundary lint caught the change and it was allowed under the rationale already written there
+for `ingestion`: any context with an HTTP surface needs to resolve the caller. The dependency
+is on the guard and the authenticated-request type, never on identity's internals.
 
 Reconciliation lives in `modules/ledger`, not a module of its own: it decides what a
 canonical transaction _is_, which is the ledger's own invariant. A separate module would

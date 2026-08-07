@@ -1,6 +1,9 @@
 # M2 — Reconciliation
 
-> Status: **design, not yet approved.** No code written against this yet.
+> Status: **implemented.** See [DEVELOPMENT.md](../DEVELOPMENT.md) for what runs and the
+> caveats that remain. Two changes were made during implementation: reconciliation lives in
+> `modules/ledger` rather than a module of its own, and `suspected_gaps` stores the user's
+> decisions rather than the gaps themselves.
 
 ## 1. Requirements
 

@@ -2,9 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import {
   type AccountId,
   type CurrencyCode,
+  err,
   isCurrencyCode,
   newId,
   type ObservationId,
+  ok,
+  type Result,
   type TransactionId,
   type UserId,
 } from '@atlas/shared-kernel';
@@ -21,6 +24,13 @@ import {
   type ObservationSet,
   projectTransaction,
 } from '../domain/reconciliation/transaction-projection';
+
+/** Why a split was refused. Expected outcomes, not exceptions. */
+export type SplitRefusal =
+  | 'observation-not-found'
+  | 'observation-not-admitted'
+  | 'observation-has-no-account'
+  | 'only-observation';
 
 /**
  * Turns a reconciliation decision into database effects (ADR-008).
@@ -130,6 +140,7 @@ export class ReconciliationService {
     survivingId: TransactionId,
     absorbedId: TransactionId,
     evidence: unknown,
+    decidedBy: 'SYSTEM' | 'USER' = 'SYSTEM',
   ): Promise<void> {
     await tx.transactionObservation.updateMany({
       where: { transactionId: absorbedId },
@@ -145,11 +156,89 @@ export class ReconciliationService {
 
     await this.recordEvent(tx, userId, {
       kind: 'MERGE',
-      decidedBy: 'SYSTEM',
+      decidedBy,
       survivingTransactionId: survivingId,
       absorbedTransactionId: absorbedId,
       evidence,
     });
+  }
+
+  /**
+   * Moves one observation out of its transaction and onto a new one, re-projecting both.
+   *
+   * The exact inverse of a merge, and the same mechanism run backwards — which is the
+   * point of transactions being projections (ADR-008). It exists because a wrong merge is
+   * otherwise unrecoverable: without a split, an over-merge would permanently hide money.
+   *
+   * A split always creates a *new* transaction rather than resurrecting the superseded row
+   * a merge produced. The superseded row stays superseded, as history: reviving an id whose
+   * absorption other records already reference would make the audit trail contradict
+   * itself.
+   */
+  async split(
+    tx: TenantClient,
+    userId: UserId,
+    observationId: ObservationId,
+  ): Promise<Result<TransactionId, SplitRefusal>> {
+    const observation = await tx.transactionObservation.findUnique({
+      where: { id: observationId },
+      select: { id: true, transactionId: true, accountId: true },
+    });
+
+    if (!observation) return err('observation-not-found');
+    if (observation.transactionId === null) return err('observation-not-admitted');
+    if (observation.accountId === null) return err('observation-has-no-account');
+
+    const originalId = observation.transactionId as TransactionId;
+
+    const siblings = await tx.transactionObservation.count({
+      where: { transactionId: originalId },
+    });
+
+    // Splitting the only observation would leave a transaction with no evidence, which the
+    // projection cannot represent. It is also pointless: the result would be identical.
+    if (siblings <= 1) return err('only-observation');
+
+    const newTransactionId = newId<'TransactionId'>();
+
+    // Created from the original's fields, then immediately re-projected from the single
+    // observation now attached to it — so the values come from evidence, not from a copy.
+    const original = await tx.transaction.findUniqueOrThrow({
+      where: { id: originalId },
+      select: { accountId: true, currency: true, direction: true, occurredAt: true },
+    });
+
+    await tx.transaction.create({
+      data: {
+        id: newTransactionId,
+        userId,
+        accountId: observation.accountId,
+        amountMinor: 0n,
+        currency: original.currency,
+        direction: original.direction,
+        occurredAt: original.occurredAt,
+        description: 'Unlabelled transaction',
+        status: 'POSTED',
+      },
+    });
+
+    await tx.transactionObservation.update({
+      where: { id: observationId },
+      data: { transactionId: newTransactionId },
+    });
+
+    await this.reproject(tx, userId, newTransactionId);
+    await this.reproject(tx, userId, originalId);
+
+    await this.recordEvent(tx, userId, {
+      kind: 'SPLIT',
+      decidedBy: 'USER',
+      survivingTransactionId: originalId,
+      absorbedTransactionId: newTransactionId,
+      evidence: { observationId, reason: 'user-initiated split' },
+    });
+
+    return ok(newTransactionId);
   }
 
   /**

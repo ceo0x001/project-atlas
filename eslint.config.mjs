@@ -16,10 +16,15 @@ import tseslint from 'typescript-eslint';
  */
 const MODULE_DEPENDENCIES = {
   identity: [],
-  ledger: [],
   // Authentication is cross-cutting: any context with an HTTP surface needs to
   // resolve the caller, and that resolution owns identity's data. Contexts may
   // therefore depend on `identity`, but only on its public barrel.
+  //
+  // `ledger` joined this list when reconciliation gained an HTTP surface — the queue of
+  // suspected duplicates and the gap questions both need a user to answer them. Same
+  // rationale as the others, not a new exception: the dependency is on the guard and the
+  // authenticated-request type, never on identity's internals.
+  ledger: ['identity'],
   ingestion: ['identity'],
   memory: [],
   voice: [],
