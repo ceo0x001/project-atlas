@@ -1,35 +1,77 @@
-## What runs today (M1 data pipeline complete; conversation layer outstanding)
+# Development
 
-M1 is **not** finished. Its definition (ARCHITECTURE §14) is "the moment Atlas answers
-'how much did I spend on food this month?' truthfully from real SMS-parsed data" — a
-question asked in words. What works today is the pipeline underneath that: a developer
-calls a repository method and gets a correct number. The conversation loop, the tool
-registry and the grounding gate are the remaining work.
+## What runs today (M1 complete — Atlas answers questions)
 
-| Piece                    | State                                                                                        |
-| ------------------------ | -------------------------------------------------------------------------------------------- |
-| `packages/shared-kernel` | Builds, 66 tests pass, lint clean                                                            |
-| `apps/api`               | Builds, boots, 202 unit tests pass, lint clean                                               |
-| SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                |
-| Ledger query compiler    | Complete — plan validation and parameterised SQL                                             |
-| Local infrastructure     | **Running.** Postgres 17.10 + pgvector 0.8.6, Redis, Temporal (SERVING), Temporal UI, Jaeger |
-| Migration + RLS          | **Applied.** 23 tables, 17 policies, `atlas_app` without superuser or BYPASSRLS              |
-| Device authentication    | Bearer tokens, SHA-256 at rest, independent credential and device revocation                 |
-| Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                          |
-| Ledger admission         | Observation to canonical transaction via domain event, with balance anchoring                |
-| **M1 end to end**        | **Working.** Real SMS text to a truthful spending total, over HTTP (37 integration tests)    |
-| Reconciliation           | Not started (M2) — one observation currently becomes one transaction                         |
-| Durable outbox relay     | Not started (M2, Temporal) — dispatch is immediate; failures stay in the backlog             |
-| User authentication      | Not started — there is deliberately no HTTP device-enrolment route yet                       |
-| `apps/mobile`            | Dart sources written, **never compiled** — Flutter is not installed                          |
-| CI                       | Written with a Postgres service, **not yet run** — nothing has been pushed                   |
+| Piece                    | State                                                                                         |
+| ------------------------ | --------------------------------------------------------------------------------------------- |
+| `packages/shared-kernel` | Builds, 66 tests, lint clean                                                                  |
+| `apps/api`               | Builds, boots, 311 unit tests, lint clean                                                     |
+| SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                 |
+| Ledger                   | Read path, admission, balance anchoring; RLS enforced and proven                              |
+| Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                           |
+| Grounding gate           | Complete — significant-figure rounding rule, 35 tests                                         |
+| Period resolution        | Complete — named periods resolved server-side, DST-correct, 41 tests                          |
+| `query_ledger` tool      | Complete — no model-authored ids, no model date arithmetic, unresolved filters return nothing |
+| Agent loop               | Complete — tool loop, grounding escalation, turn persistence, 19 integration tests            |
+| `POST /v1/chat`          | Complete, device-authenticated                                                                |
+| **Live, end to end**     | **Working against Claude Opus 5** — verified answers from real ledger data                    |
+| Reconciliation           | Not started (M2)                                                                              |
+| Durable outbox relay     | Not started (M2, Temporal)                                                                    |
+| User authentication      | Not started — no HTTP device-enrolment route yet, deliberately                                |
+| `apps/mobile`            | Dart sources written, **never compiled** — Flutter is not installed                           |
+| CI                       | Written with a Postgres service, **not yet run** — nothing has been pushed                    |
 
-Nothing above is claimed to work beyond what that table says.
+### Talking to Atlas from the terminal
 
-Tenant isolation is verified rather than assumed: with no `atlas.user_id` set a query
-returns **zero rows**, a cross-tenant `INSERT` is rejected by the policy, and a
-cross-tenant `UPDATE` affects zero rows. The integration suite asserts the same three
-properties through the repository, not just through psql.
+```bash
+pnpm --filter @atlas/api run build
+node apps/api/dist/cli/ask.js --user <userId> "how much did I spend this month?"
+```
+
+Runs the real loop against the real ledger and the real model. A development tool,
+not a product surface — it bypasses HTTP and device auth by design.
+
+## Measured on real data — and it changes a recommendation
+
+Verified live against Claude Opus 5 with a seeded ledger. Answers are correct and
+grounded; **cost and latency are both far outside target**, and they point the same way.
+
+| Metric               | Measured            | Target                 |
+| -------------------- | ------------------- | ---------------------- |
+| Cost per question    | **$0.026 – $0.036** | needs to be ~10x lower |
+| Latency per question | **9 – 15 s**        | < 1.5 s to first audio |
+
+At ~$0.03 a question and ten questions a day, inference alone is **$8–11 per user
+per month** — roughly ₦13,000–17,600. That is not a viable price for a Nigerian
+consumer product, and it is risk R4 arriving with hard numbers rather than as a
+worry. Latency is 6–10x over target for the same reason: two sequential Opus 5 calls
+per question.
+
+Both point at the same conclusion: **Opus 5 is the wrong default for the common
+case.** The levers, in order of impact:
+
+1. **Model routing.** Haiku 4.5 is $1/$5 per MTok against Opus 5's $5/$25 — 5x
+   cheaper and materially faster. Most questions here are one tool call and one
+   sentence. Route to Haiku, escalate to Opus only when the cheap model fails or the
+   grounding gate degrades. This is the architectural fix.
+2. **Shorter answers.** Output is roughly half the cost, and every reply currently
+   appends a data-completeness caveat because the system prompt asks for it. Saying
+   it once per session rather than once per answer cuts output materially.
+3. **Streaming** (M3 anyway). Does nothing for cost, but collapses _perceived_
+   latency: first token in ~2s instead of a 10s wait.
+
+Lowering `ANTHROPIC_EFFORT` to `low` was measured and **did not help** — latency is
+dominated by round trips and generation, not thinking depth. Do not reach for effort
+as the latency lever here.
+
+### Cost telemetry was wrong at first
+
+Worth recording because the failure was silent: the first implementation priced only
+`usage.input_tokens`, which reports the _uncached remainder_. With prompt caching
+active (the cacheable prefix measures 1,521 tokens against Opus 5's 512 minimum),
+that under-reported real cost by 40–60%. Cache writes bill at 1.25x the input rate
+and reads at 0.1x, so all four components are now priced and all four are persisted
+per turn — which also makes cache hit rate observable.
 
 ## The M1 core, and what it guarantees
 

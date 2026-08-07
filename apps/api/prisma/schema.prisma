@@ -742,6 +742,10 @@ model ConversationTurn {
   latencyMs          Int?
   inputTokens        Int?
   outputTokens       Int?
+  /// Cache tokens are billed at different rates (writes 1.25x, reads 0.1x), so cost
+  /// cannot be computed without them — and cache read rate is itself a tracked metric.
+  cacheCreationInputTokens Int?
+  cacheReadInputTokens     Int?
   /// Cost in millionths of a USD — integer, for the same reason money is (ADR-003).
   costMicroUsd       Int?
 

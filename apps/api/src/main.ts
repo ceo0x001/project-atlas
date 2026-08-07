@@ -1,6 +1,11 @@
-// Telemetry must be the very first import in the process: OpenTelemetry patches
-// modules such as http and pg as they load, so anything required before this line
-// is invisible to tracing.
+// Load .env before anything reads process.env. Deliberate and explicit: relying on
+// a variable happening to be exported in a developer's shell is how a service boots
+// fine locally and fails on a clean machine. In production the platform supplies the
+// environment and there is no file to find, which `dotenv` handles silently.
+import 'dotenv/config';
+
+// Telemetry must come next: OpenTelemetry patches modules such as http and pg as
+// they load, so anything required before this line is invisible to tracing.
 import './observability/telemetry';
 
 import { Logger } from '@nestjs/common';
