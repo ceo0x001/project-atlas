@@ -8,9 +8,17 @@ import type {
 } from '@atlas/shared-kernel';
 
 /**
- * Ingestion emits observations; it never writes to the ledger (ARCHITECTURE §4).
- * The ledger decides what becomes a canonical transaction, which keeps admission
- * logic in one place and lets ingestion stay a dumb, testable parser.
+ * Cross-context event contracts.
+ *
+ * These live in `shared` rather than inside the publishing module on purpose. An
+ * event is the shared language between two bounded contexts, so it belongs to
+ * neither: if `ingestion` owned `TransactionObserved`, then `ledger` would have to
+ * import `ingestion` to consume it, and the dependency the event exists to avoid
+ * would reappear through the back door.
+ *
+ * Payloads carry primitives only — amounts as decimal strings, timestamps as ISO
+ * strings — because these are serialised through the outbox and must survive a
+ * round trip through JSON unchanged. A BigInt would not.
  */
 
 export const TRANSACTION_OBSERVED = 'ingestion.transaction_observed' as const;
@@ -20,22 +28,21 @@ export type ObservationSource = 'SMS' | 'EMAIL' | 'STATEMENT' | 'USER_STATED' | 
 export interface TransactionObservedPayload {
   readonly observationId: ObservationId;
   readonly source: ObservationSource;
-  readonly accountId: AccountId | null;
+  readonly accountId: AccountId;
   readonly institutionId: InstitutionId | null;
   readonly deviceId: DeviceId | null;
+  /** Unsigned magnitude in minor units; `direction` carries the sign. */
   readonly amountMinor: string;
   readonly currency: CurrencyCode;
   readonly direction: 'DEBIT' | 'CREDIT';
   readonly occurredAt: string;
   /**
-   * Balance the source reported after this movement. The reconciliation anchor:
-   * it verifies ledger arithmetic and exposes gaps, so Atlas can say "I think I am
-   * missing a transaction" instead of quietly reporting a wrong total.
+   * Balance the source reported after this movement. The reconciliation anchor: it
+   * lets the ledger verify its own arithmetic and detect gaps, so Atlas can say
+   * "I think I am missing a transaction" instead of quietly reporting a wrong total.
    */
   readonly balanceAfterMinor: string | null;
   readonly description: string | null;
-  /** Deterministic hash of source content — makes replayed sync idempotent. */
-  readonly dedupeKey: string;
 }
 
 export type TransactionObservedEvent = DomainEvent<

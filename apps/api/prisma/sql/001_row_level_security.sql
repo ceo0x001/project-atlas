@@ -126,17 +126,5 @@ $$;
 -- client; it stays owner-only and is not granted to atlas_app for SELECT beyond
 -- what the relay needs.
 
--- ============================================================================
--- Vector and search indexes
--- ============================================================================
-
--- HNSW for episodic recall. Cosine distance matches the embedding model's
--- similarity metric; the dimension must stay in step with EMBEDDING_DIMENSIONS
--- and the vector(1024) column (a schema test asserts the latter).
-CREATE INDEX IF NOT EXISTS episodes_embedding_hnsw
-  ON episodes USING hnsw (embedding vector_cosine_ops);
-
--- Trigram search over transaction descriptions, for "that transfer to Musa".
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-CREATE INDEX IF NOT EXISTS transactions_description_trgm
-  ON transactions USING gin (description gin_trgm_ops);
+-- Hand-managed indexes (HNSW, trigram) live in prisma/sql/managed-indexes.sql,
+-- which must be appended to every generated migration. See that file for why.

@@ -1,20 +1,22 @@
-# Development
+## What runs today (M1 complete end to end)
 
-## What runs today (M0 complete, M1 in progress)
-
-| Piece                    | State                                                                                                |
-| ------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `packages/shared-kernel` | Builds, 66 tests pass, lint clean                                                                    |
-| `apps/api`               | Builds, boots, 186 unit tests pass, lint clean; `/health/live` 200, `/health/ready` 503 without a DB |
-| SMS template engine      | Complete and tested — parsing, transforms, validation gate, dedupe keys                              |
-| Ledger query compiler    | Complete and tested — plan validation and parameterised SQL generation                               |
-| Local infrastructure     | **Running.** Postgres 17.10 + pgvector 0.8.6, Redis, Temporal (SERVING), Temporal UI, Jaeger         |
-| Migration + RLS          | **Applied.** 22 tables, 17 policies, `atlas_app` role without superuser or BYPASSRLS                 |
-| Ledger repository        | Read side complete — 17 integration tests against real Postgres                                      |
-| Ledger write side        | Not started — lands with reconciliation (M2)                                                         |
-| SMS sync endpoint        | Not started — needs the Android device                                                               |
-| `apps/mobile`            | Dart sources written, **never compiled** — Flutter is not installed                                  |
-| CI                       | Written with a Postgres service, **not yet run** — nothing has been pushed                           |
+| Piece                    | State                                                                                        |
+| ------------------------ | -------------------------------------------------------------------------------------------- |
+| `packages/shared-kernel` | Builds, 66 tests pass, lint clean                                                            |
+| `apps/api`               | Builds, boots, 202 unit tests pass, lint clean                                               |
+| SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                |
+| Ledger query compiler    | Complete — plan validation and parameterised SQL                                             |
+| Local infrastructure     | **Running.** Postgres 17.10 + pgvector 0.8.6, Redis, Temporal (SERVING), Temporal UI, Jaeger |
+| Migration + RLS          | **Applied.** 23 tables, 17 policies, `atlas_app` without superuser or BYPASSRLS              |
+| Device authentication    | Bearer tokens, SHA-256 at rest, independent credential and device revocation                 |
+| Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                          |
+| Ledger admission         | Observation to canonical transaction via domain event, with balance anchoring                |
+| **M1 end to end**        | **Working.** Real SMS text to a truthful spending total, over HTTP (37 integration tests)    |
+| Reconciliation           | Not started (M2) — one observation currently becomes one transaction                         |
+| Durable outbox relay     | Not started (M2, Temporal) — dispatch is immediate; failures stay in the backlog             |
+| User authentication      | Not started — there is deliberately no HTTP device-enrolment route yet                       |
+| `apps/mobile`            | Dart sources written, **never compiled** — Flutter is not installed                          |
+| CI                       | Written with a Postgres service, **not yet run** — nothing has been pushed                   |
 
 Nothing above is claimed to work beyond what that table says.
 

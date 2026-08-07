@@ -1,4 +1,7 @@
 import { Module } from '@nestjs/common';
+import { IdentityModule } from '@modules/identity';
+import { SyncController } from './api/sync.controller';
+import { ObservationIntakeService } from './application/observation-intake.service';
 
 /**
  * Ingestion — SMS/email parse templates, statement imports, deduplication.
@@ -7,7 +10,12 @@ import { Module } from '@nestjs/common';
  * admission rules stay in one place and this module remains a pure, testable
  * parsing pipeline.
  *
- * Implementations land in M1 (SMS) and M2 (statements, reconciliation).
+ * Statement import and the template-synthesis flywheel land in M2.
  */
-@Module({})
+@Module({
+  imports: [IdentityModule],
+  controllers: [SyncController],
+  providers: [ObservationIntakeService],
+  exports: [ObservationIntakeService],
+})
 export class IngestionModule {}

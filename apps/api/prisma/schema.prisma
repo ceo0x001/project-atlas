@@ -95,9 +95,35 @@ model Device {
 
   user         User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
   observations TransactionObservation[]
+  credential   DeviceCredential?
 
   @@index([userId])
   @@map("devices")
+}
+
+/// Device bearer credentials.
+///
+/// Deliberately NOT under row-level security, and the only table in the schema with
+/// that exemption. RLS decides visibility from `atlas.user_id` — but this is the
+/// table that *establishes* which user is calling, so gating it by tenancy would be
+/// circular: the lookup would need the answer it is trying to produce.
+///
+/// It is safe to exempt because it holds no financial data: only a token hash and
+/// the identity it maps to. The plaintext token is shown once at enrolment and never
+/// stored, so a dump of this table cannot be replayed as a device.
+model DeviceCredential {
+  /// SHA-256 of the bearer token, hex encoded. Primary key so lookup is an index hit.
+  tokenHash  String    @id
+  deviceId   String    @unique
+  userId     String
+  issuedAt   DateTime  @default(now()) @db.Timestamptz(3)
+  lastUsedAt DateTime? @db.Timestamptz(3)
+  revokedAt  DateTime? @db.Timestamptz(3)
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("device_credentials")
 }
 
 enum ConsentScope {

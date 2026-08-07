@@ -9,6 +9,7 @@ import { LedgerModule } from '@modules/ledger';
 import { MemoryModule } from '@modules/memory';
 import { NotificationsModule } from '@modules/notifications';
 import { VoiceModule } from '@modules/voice';
+import { EventsModule } from '@shared/events/events.module';
 import { PrismaModule } from '@shared/prisma/prisma.module';
 
 /**
@@ -19,6 +20,7 @@ import { PrismaModule } from '@shared/prisma/prisma.module';
   imports: [
     ConfigModule,
     PrismaModule,
+    EventsModule,
     HealthModule,
 
     IdentityModule,

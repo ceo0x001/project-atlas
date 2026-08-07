@@ -17,7 +17,10 @@ import tseslint from 'typescript-eslint';
 const MODULE_DEPENDENCIES = {
   identity: [],
   ledger: [],
-  ingestion: [],
+  // Authentication is cross-cutting: any context with an HTTP surface needs to
+  // resolve the caller, and that resolution owns identity's data. Contexts may
+  // therefore depend on `identity`, but only on its public barrel.
+  ingestion: ['identity'],
   memory: [],
   voice: [],
   notifications: [],
