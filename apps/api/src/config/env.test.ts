@@ -50,23 +50,36 @@ describe('parseEnv', () => {
   });
 
   /**
-   * Production is deliberately not bootable yet.
-   *
-   * The only OTP sender that exists writes live sign-in codes to the log, so a production
-   * deploy would publish credentials to whatever aggregates logs. Refusing to start is the
-   * intended behaviour, and this test exists to keep it intentional — someone removing the
-   * check to "unblock a deploy" fails here rather than shipping the hole.
-   *
-   * When a real SMS sender is implemented, this test changes to assert it is accepted. That
-   * edit should be a deliberate act, which is exactly why it is pinned.
+   * Production boots with phone sign-in disabled, which is the single-user posture (ADR-009).
+   * `none` removes the flow rather than weakening it, so there is no code to leak.
    */
-  it('still refuses production while only the development OTP sender exists', () => {
+  it('accepts production with phone sign-in disabled', () => {
+    expect(() =>
+      parseEnv({
+        ...minimalEnv,
+        NODE_ENV: 'production',
+        OTP_SENDER: 'none',
+        ANTHROPIC_API_KEY: 'sk-ant-test',
+        VOYAGE_API_KEY: 'pa-test',
+        ENCRYPTION_ROOT_KEY: 'root-key',
+        JWT_SIGNING_KEY: 'jwt-key',
+      }),
+    ).not.toThrow();
+  });
+
+  /**
+   * The development sender writes live sign-in codes to the log, so it stays forbidden in
+   * production. Pinned so removing the check to "unblock a deploy" fails here rather than
+   * shipping credentials into a log aggregator.
+   */
+  it('still refuses production with the development OTP sender', () => {
     let message = '';
 
     try {
       parseEnv({
         ...minimalEnv,
         NODE_ENV: 'production',
+        OTP_SENDER: 'log',
         ANTHROPIC_API_KEY: 'sk-ant-test',
         VOYAGE_API_KEY: 'pa-test',
         ENCRYPTION_ROOT_KEY: 'root-key',
@@ -80,31 +93,8 @@ describe('parseEnv', () => {
     expect(message).toContain('must not be used in production');
   });
 
-  it('accepts every other production requirement, so only the sender is outstanding', () => {
-    let message = '';
-
-    try {
-      parseEnv({
-        ...minimalEnv,
-        NODE_ENV: 'production',
-        ANTHROPIC_API_KEY: 'sk-ant-test',
-        VOYAGE_API_KEY: 'pa-test',
-        ENCRYPTION_ROOT_KEY: 'root-key',
-        JWT_SIGNING_KEY: 'jwt-key',
-      });
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
-    }
-
-    // Proves the secret checks are satisfied: none of them appear among the complaints.
-    for (const secret of [
-      'ANTHROPIC_API_KEY',
-      'VOYAGE_API_KEY',
-      'ENCRYPTION_ROOT_KEY',
-      'JWT_SIGNING_KEY',
-    ]) {
-      expect(message).not.toContain(secret);
-    }
+  it('disables phone sign-in by default', () => {
+    expect(parseEnv(minimalEnv).OTP_SENDER).toBe('none');
   });
 
   it('accepts a development environment with the log sender', () => {

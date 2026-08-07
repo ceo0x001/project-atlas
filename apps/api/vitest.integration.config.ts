@@ -26,5 +26,12 @@ export default defineConfig({
     fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 30_000,
+    env: {
+      // Phone sign-in is disabled by default (ADR-009), which is right for a single-user
+      // deployment but would make the sign-in tests assert a 503 instead of exercising the flow.
+      // The log sender keeps that whole surface under test — including its abuse cases — so
+      // enabling a second user later does not mean shipping untested authentication.
+      OTP_SENDER: 'log',
+    },
   },
 });

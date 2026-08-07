@@ -1,3 +1,31 @@
+### Phone sign-in is disabled by default (ADR-009)
+
+Atlas v1 is deployed for **one operator**, so `OTP_SENDER=none` is the default and phone sign-in
+is off: the sender throws and `/v1/auth/*` answers 503 with an explanation. Devices are enrolled
+locally instead:
+
+```bash
+node dist/cli/enrol-device.js --phone 08012345678 --label "Pixel 8a"
+```
+
+That creates the user on first run and prints the token once. It reuses an existing user across
+differently-formatted numbers, because the phone is normalised before lookup.
+
+**`none` is production-safe where `log` is not**, and the distinction is the point: `none` removes
+the flow, so no code is generated and there is nothing to leak. `log` writes live codes into the
+application log, so `parseEnv` still refuses to start with it in production — pinned by a test, so
+removing that check to unblock a deploy fails the build.
+
+**No SMS gateway is required to build, run or deploy Atlas.** It was on the critical path only
+because of an unexamined assumption that v1 had users other than the operator. The `OtpSender`
+port and the whole sign-in flow are retained — 27 unit and 22 integration tests — because that is
+the path a second user would arrive through, and adding a real sender is one enum value and an
+adapter.
+
+**The enrolment CLI must never gain an HTTP route.** It takes a phone number and mints a
+credential with no proof of anything; its safety is entirely that it runs locally. That is the same
+reason `DeviceEnrolmentService` has never had a controller.
+
 # Development
 
 ## What runs today (M1 complete — Atlas answers questions)
@@ -5,7 +33,7 @@
 | Piece                    | State                                                                                                   |
 | ------------------------ | ------------------------------------------------------------------------------------------------------- |
 | `packages/shared-kernel` | Builds, 66 tests, lint clean                                                                            |
-| `apps/api`               | Builds, boots, 513 unit tests + 152 integration, lint clean                                             |
+| `apps/api`               | Builds, boots, 514 unit tests + 152 integration, lint clean                                             |
 | SMS template engine      | Complete — parsing, transforms, publication gate, dedupe keys                                           |
 | Ledger                   | Read path, admission, balance anchoring; RLS enforced and proven                                        |
 | Sync endpoint            | `POST /v1/sync/observations` — authenticated, validated, idempotent                                     |
@@ -17,7 +45,7 @@
 | **Live, end to end**     | **Working on two-tier routing** — Haiku 4.5 answers, Opus 5 on escalation                               |
 | Reconciliation           | **Complete** — matching, merge, split, gap detection, and endpoints to answer questions                 |
 | Durable outbox relay     | **Working** — leased claim with `SKIP LOCKED`, backoff, dead-letter, pruning (no Temporal)              |
-| User authentication      | **Working** — phone OTP, first sign-in creates the user, device enrolled over HTTP                      |
+| User authentication      | **Working** — device enrolled by CLI (single-user, ADR-009); phone OTP built but disabled               |
 | `apps/mobile`            | `flutter analyze` + `flutter test` **green in CI**; never compiled locally (no SDK)                     |
 | CI                       | **Green** since the first run — Backend ~1.5 min, Mobile ~2 min ([ci.yml](../.github/workflows/ci.yml)) |
 

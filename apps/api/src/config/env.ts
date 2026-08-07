@@ -31,14 +31,23 @@ const baseSchema = z.object({
   TEMPORAL_TASK_QUEUE: z.string().default('atlas-core'),
 
   /**
-   * How one-time sign-in codes are delivered.
+   * How one-time sign-in codes are delivered — or whether phone sign-in exists at all.
    *
-   * `log` writes the code to the application log and sends nothing — usable on a laptop
-   * without an SMS account, and a security hole in any deployed environment. The refinement
-   * below refuses to start in production while it is selected, because "remember not to
-   * deploy with the dev sender" is not a security control.
+   * `none` disables phone sign-in entirely: `/v1/auth/*` refuses, and devices are enrolled
+   * with `pnpm --filter @atlas/api exec node dist/cli/enrol-device.js` instead. This is the
+   * correct setting for a single-user deployment (ADR-009), where a one-time code exists to
+   * authenticate someone you do not know and there is nobody to authenticate but yourself.
+   * It is safe in production because there is no code to leak.
+   *
+   * `log` writes the code to the application log and sends nothing — usable on a laptop, and
+   * a security hole anywhere else. The refinement below refuses to start in production while
+   * it is selected, because "remember not to deploy with the dev sender" is not a control.
+   *
+   * A real SMS sender would be a third value, and is only needed once there are users other
+   * than the operator. Sending SMS to Nigerian numbers requires an NCC-registered sender ID,
+   * which requires business registration — a launch prerequisite, not a build one.
    */
-  OTP_SENDER: z.enum(['log']).default('log'),
+  OTP_SENDER: z.enum(['none', 'log']).default('none'),
 
   ANTHROPIC_API_KEY: z.string().optional(),
   /**
@@ -94,18 +103,17 @@ const envSchema = baseSchema.superRefine((env, ctx) => {
     }
   }
 
-  // The development sender writes live sign-in codes into the log. Reaching production with
-  // it selected would publish credentials to whatever aggregates logs, so the process
-  // refuses to start rather than running insecurely. `OTP_SENDER` currently has only this
-  // one value, which means production cannot boot until a real gateway is implemented — a
-  // deliberate, visible block rather than a quiet vulnerability.
+  // The development sender writes live sign-in codes into the log, so reaching production with
+  // it selected would publish credentials to whatever aggregates logs. `none` is permitted in
+  // production precisely because it removes the flow rather than weakening it — there is no
+  // code, so there is nothing to leak.
   if (env.OTP_SENDER === 'log') {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['OTP_SENDER'],
       message:
         'OTP_SENDER=log writes sign-in codes to the log and must not be used in production; ' +
-        'implement and select a real SMS sender',
+        'use OTP_SENDER=none for a single-user deployment, or implement a real SMS sender',
     });
   }
 });

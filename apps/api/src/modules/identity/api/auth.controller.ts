@@ -22,6 +22,11 @@ import {
  * `verify` collapses every rejection into one 401 with no detail. Distinguishing "wrong
  * code" from "expired" from "already used" would tell an attacker which of the three limits
  * protecting a six-digit secret they had run into, and therefore which to work around.
+ *
+ * On a single-user deployment (`OTP_SENDER=none`, the default — ADR-009) this whole surface is
+ * inert: the sender throws, so both routes answer 503 with an explanation. That is deliberately
+ * a clear refusal rather than a 404 — six months from now the person confused by it will be the
+ * operator, and "this is disabled, use the CLI" is worth more than a hidden route.
  */
 @Controller('v1/auth')
 export class AuthController {

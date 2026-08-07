@@ -4,7 +4,9 @@ import { DeviceAuthGuard } from './api/device-auth.guard';
 import { DeviceAuthenticator } from './application/device-authenticator';
 import { DeviceEnrolmentService } from './application/device-enrolment.service';
 import { PhoneAuthService } from './application/phone-auth.service';
-import { OTP_SENDER } from './domain/otp-sender.port';
+import { ENV, type Env } from '@config/env';
+import { OTP_SENDER, type OtpSender } from './domain/otp-sender.port';
+import { DisabledOtpSender } from './infrastructure/disabled-otp.sender';
 import { LogOtpSender } from './infrastructure/log-otp.sender';
 
 /**
@@ -19,9 +21,12 @@ import { LogOtpSender } from './infrastructure/log-otp.sender';
  * phone-first and a password would be another secret to breach for no benefit when the
  * phone is already the identifier.
  *
- * The OTP sender is bound through a port so the flow could be built and tested before an
- * SMS gateway is chosen and paid for. Only a development implementation exists, and
- * `parseEnv` refuses to start in production while it is selected.
+ * The OTP sender is bound through a port, and which implementation is bound is a deployment
+ * decision rather than a code one. `none` — the default, and correct for a single-user
+ * deployment (ADR-009) — disables phone sign-in altogether and is safe in production because
+ * there is no code to leak. `log` prints the code and `parseEnv` refuses to start in production
+ * while it is selected. A real SMS sender is only needed once there are users other than the
+ * operator.
  */
 @Module({
   controllers: [AuthController],
@@ -30,7 +35,12 @@ import { LogOtpSender } from './infrastructure/log-otp.sender';
     DeviceEnrolmentService,
     DeviceAuthGuard,
     PhoneAuthService,
-    { provide: OTP_SENDER, useClass: LogOtpSender },
+    {
+      provide: OTP_SENDER,
+      inject: [ENV],
+      useFactory: (env: Env): OtpSender =>
+        env.OTP_SENDER === 'log' ? new LogOtpSender() : new DisabledOtpSender(),
+    },
   ],
   exports: [DeviceAuthenticator, DeviceEnrolmentService, DeviceAuthGuard, PhoneAuthService],
 })
